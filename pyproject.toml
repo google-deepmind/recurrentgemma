@@ -1,0 +1,39 @@
+[tool.poetry]
+name = "recurrentgemma"
+version = "0.1.0"
+description = "Open weights large language model (LLM) from Google DeepMind."
+authors = [
+  "Alex Botev <botev@google.com>",
+  "Anushan Fernando <anushanf@google.com>",
+  "George-Cristian Muraru <gmuraru@google.com>",
+  "Leonard Berrada <lberrada@google.com>",
+  "Ruba Haroun <rharoun@google.com>",
+  "Samuel L. Smith <slsmith@google.com>",
+  "Soham De <sohamde@google.com>",
+]
+repository = "https://github.com/google-deepmind/recurrentgemma"
+license = "Apache-2.0"
+readme = "README.md"
+
+[tool.poetry.dependencies]
+python = "^3.10"
+absl-py = "~1.4.0"
+sentencepiece = "^0.2.0"
+numpy = "^1.21"
+einops = "^0.7.0"
+jaxtyping = "^0.2.28"
+orbax-checkpoint = { version = "0.5.7", optional = true}
+jax = { version = "~0.4.23", optional = true }
+flax = { version = "^0.8.2", optional = true }
+torch = { version = "^2.2.0", optional = true }
+pytest = { version = "^8.0.0", optional = true }
+
+[tool.poetry.extras]
+full = ["jax", "orbax-checkpoint", "flax", "torch"]
+jax = ["jax", "orbax-checkpoint", "flax"]
+torch = ["torch"]
+test = ["pytest", "jax", "orbax-checkpoint", "flax", "torch"]
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
