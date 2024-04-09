@@ -6,8 +6,8 @@ This repository contains the model implementation and examples for sampling and 
 
 ### Learn more about RecurrentGemma
 
--   The [Griffin paper](https://arxiv.org/abs/2402.19427) describes the model architecture.
--   We will shortly be releasing additional details on the training pipeline for RecurrentGemma.
+-   The [RecurrentGemma technical report](https://storage.googleapis.com/deepmind-media/gemma/recurrentgemma-report.pdf) gives specific details on the training and evaluation of RecurrentGemma.
+-   The [Griffin paper](https://arxiv.org/abs/2402.19427) describes the underlying model architecture.
 
 ## Quick start
 
