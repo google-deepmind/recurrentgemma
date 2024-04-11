@@ -26,7 +26,7 @@ import torch
 def jax_array_to_torch_tensor(x: jax.Array) -> torch.Tensor:
   """Converts a JAX array to a PyTorch Tensor."""
   if x.dtype == jnp.bfloat16:
-    # We cannot directly convert bf16 to numpy, so we temporary cast to flat32.
+    # We cannot directly convert bf16 to numpy, so we temporary cast to float32.
     x = x.astype(np.float32)
     dtype = torch.bfloat16
   else:

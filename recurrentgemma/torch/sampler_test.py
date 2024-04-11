@@ -194,6 +194,7 @@ class SamplerTest(parameterized.TestCase):
         [raw_input],
         total_generation_steps=total_generation_steps,
         echo=True,
+        return_logits=True,
     )
     total_sampled_tokens = total_generation_steps + token_input.shape[-1]
     self.assertEqual(

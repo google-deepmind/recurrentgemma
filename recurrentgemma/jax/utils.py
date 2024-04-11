@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 # ============================================================================
-"""Utility functions for loading parameters from a checkpoint."""
+"""Utility functions for loading + saving parameters from a checkpoint."""
 
 from collections.abc import Mapping
 from typing import Any
@@ -20,6 +20,12 @@ import jax
 from jax.experimental import mesh_utils
 import orbax.checkpoint
 from recurrentgemma.jax import array_typing as at
+
+
+def save_parameters(checkpoint_path: str, params: at.Params):
+  ckpt = {"params": params}
+  orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
+  orbax_checkpointer.save(checkpoint_path, ckpt,)
 
 
 def load_parameters(

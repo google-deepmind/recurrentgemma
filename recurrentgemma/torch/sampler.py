@@ -237,7 +237,7 @@ class Sampler:
       input_strings: Sequence[str],
       total_generation_steps: int,
       echo: bool = False,
-      return_logits: bool = True,
+      return_logits: bool = False,
   ) -> SamplerOutput:
     """Samples a completion of the input string.
 
