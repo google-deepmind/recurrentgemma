@@ -54,7 +54,7 @@ class GriffinConfig(NamedTuple):
 
   Attributes:
     vocab_size: The number of tokens in the vocabulary.
-    width: The dimenonality of the model, e.g. the dimensonality of the
+    width: The dimenonality of the model, e.g. the dimensionality of the
       embeddings and the output of each layer.
     mlp_expanded_width: The width of the hidden layer in the MLP block.
     num_heads: The number of heads for the attention block and the number of
