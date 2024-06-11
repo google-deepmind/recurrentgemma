@@ -82,6 +82,9 @@ class SamplerTest(parameterized.TestCase):
         width=128,
         mlp_expanded_width=512,
         num_heads=4,
+        embeddings_scale_by_sqrt_dim=True,
+        attention_window_size=2048,
+        logits_soft_cap=30.0,
     )
     model = griffin_lib.Griffin(model_config)
 
@@ -113,6 +116,9 @@ class SamplerTest(parameterized.TestCase):
         width=128,
         mlp_expanded_width=512,
         num_heads=4,
+        embeddings_scale_by_sqrt_dim=True,
+        attention_window_size=2048,
+        logits_soft_cap=30.0,
     )
     model = griffin_lib.Griffin(model_config)
 
@@ -172,6 +178,9 @@ class SamplerTest(parameterized.TestCase):
         width=128,
         mlp_expanded_width=512,
         num_heads=4,
+        embeddings_scale_by_sqrt_dim=True,
+        attention_window_size=2048,
+        logits_soft_cap=30.0,
     )
 
     model = griffin_lib.Griffin(model_config)
@@ -184,8 +193,8 @@ class SamplerTest(parameterized.TestCase):
 
     params = model.init(
         jax.random.PRNGKey(42),
-        jnp.array([[1]]),
-        jnp.array([[1]]),
+        tokens=jnp.array([[1]]),
+        segment_pos=jnp.array([[0]]),
     )
 
     params = jax.tree_util.tree_map(

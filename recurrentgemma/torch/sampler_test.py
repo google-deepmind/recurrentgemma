@@ -80,6 +80,9 @@ class SamplerTest(parameterized.TestCase):
         width=128,
         mlp_expanded_width=512,
         num_heads=4,
+        embeddings_scale_by_sqrt_dim=True,
+        attention_window_size=2048,
+        logits_soft_cap=30.0,
     )
     model = griffin_lib.Griffin(model_config)
 
@@ -105,6 +108,9 @@ class SamplerTest(parameterized.TestCase):
         width=128,
         mlp_expanded_width=512,
         num_heads=4,
+        embeddings_scale_by_sqrt_dim=True,
+        attention_window_size=2048,
+        logits_soft_cap=30.0,
     )
     model = griffin_lib.Griffin(model_config)
 
@@ -133,15 +139,13 @@ class SamplerTest(parameterized.TestCase):
     if not return_logits:
       self.assertEmpty(output_sampler.logits)
     else:
-      self.assertEqual(
-          torch.tensor(output_sampler.logits).shape,
-          (batch_size, total_tokens, vocab.GetPieceSize()),
-      )
+      self.assertLen(output_sampler.logits, batch_size)
+      for logits in output_sampler.logits:
+        self.assertEqual(logits.shape, (total_tokens, vocab.GetPieceSize()))
 
-    self.assertEqual(
-        torch.tensor(output_sampler.tokens).shape,
-        (batch_size, total_tokens),
-    )
+    self.assertLen(output_sampler.tokens, batch_size)
+    for tokens in output_sampler.tokens:
+      self.assertEqual(tokens.shape, (total_tokens,))
 
   @parameterized.parameters([torch.bfloat16, torch.float32])
   def test_forward_equivalence(self, dtype: torch.dtype):
@@ -157,6 +161,9 @@ class SamplerTest(parameterized.TestCase):
         width=128,
         mlp_expanded_width=512,
         num_heads=4,
+        embeddings_scale_by_sqrt_dim=True,
+        attention_window_size=2048,
+        logits_soft_cap=30.0,
     )
 
     model = griffin_lib.Griffin(model_config)
@@ -183,7 +190,6 @@ class SamplerTest(parameterized.TestCase):
         tokens=token_input,
         segment_pos=segment_pos,
     )
-    output_forward = output_forward[0, :n_input_tokens]
     sampler = griffin_lib.Sampler(
         model=model,
         vocab=vocab,
@@ -197,16 +203,16 @@ class SamplerTest(parameterized.TestCase):
         return_logits=True,
     )
     total_sampled_tokens = total_generation_steps + token_input.shape[-1]
-    self.assertEqual(
-        torch.tensor(output_sampler.logits).shape,
-        (batch_size, total_sampled_tokens, model_config.vocab_size),
-    )
-    self.assertEqual(
-        torch.tensor(output_sampler.tokens).shape,
-        (batch_size, total_sampled_tokens),
-    )
-    out_logits = torch.tensor(output_sampler.logits, dtype=output_forward.dtype)
-    out_logits = out_logits[0, :n_input_tokens]
+
+    self.assertLen(output_sampler.logits, batch_size)
+    for logits in output_sampler.logits:
+      self.assertEqual(
+          logits.shape, (total_sampled_tokens, model_config.vocab_size)
+      )
+
+    self.assertLen(output_sampler.tokens, batch_size)
+    for tokens in output_sampler.tokens:
+      self.assertEqual(tokens.shape, (total_sampled_tokens,))
 
     if dtype == torch.bfloat16:
       rtol = 1e-4
@@ -215,12 +221,13 @@ class SamplerTest(parameterized.TestCase):
       rtol = 1e-6
       atol = 1e-3
 
-    torch.testing.assert_close(
-        output_forward,
-        out_logits,
-        rtol=rtol,
-        atol=atol,
-    )
+    for i, out_logits in enumerate(output_sampler.logits):
+      torch.testing.assert_close(
+          output_forward[i, :n_input_tokens],
+          out_logits[:n_input_tokens].type(output_forward.dtype),
+          rtol=rtol,
+          atol=atol,
+      )
 
 
 if __name__ == '__main__':

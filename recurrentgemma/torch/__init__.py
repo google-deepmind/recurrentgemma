@@ -23,6 +23,7 @@ from recurrentgemma.torch import sampler
 
 ScanType = common.ScanType
 TemporalBlockType = common.TemporalBlockType
+Preset = common.Preset
 GriffinConfig = common.GriffinConfig
 rnn_scan = layers.rnn_scan
 BlockDiagonalLinear = layers.BlockDiagonalLinear
@@ -51,6 +52,7 @@ __all__ = (
     "LocalAttentionBlock",
     "ResidualBlockCache",
     "ResidualBlock",
+    "Preset",
     "GriffinConfig",
     "Griffin",
     "Sampler",

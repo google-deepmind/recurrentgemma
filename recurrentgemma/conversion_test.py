@@ -47,6 +47,9 @@ class ConversionTest(absltest.TestCase):
         num_heads=NUM_HEADS,
         lru_width=LRU_WIDTH,
         block_types=BLOCK_TYPES,
+        embeddings_scale_by_sqrt_dim=True,
+        attention_window_size=2048,
+        logits_soft_cap=30.0,
     )
     model = griffin_jax.Griffin(config)
 

@@ -1,6 +1,6 @@
 # How to Contribute
 
-We are currently evaluating whether to accept external PRs.
+We are currently not accepting external PRs.
 
 ## Before you begin
 
@@ -22,11 +22,3 @@ sign a new one.
 
 This project follows [Google's Open Source Community
 Guidelines](https://opensource.google/conduct/).
-
-## Contribution process
-
-### Code Reviews
-
-All submissions, including submissions by project members, require review. We
-use [GitHub pull requests](https://docs.github.com/articles/about-pull-requests)
-for this purpose.

@@ -15,7 +15,6 @@
 """Short example how to run a model."""
 
 from collections.abc import Sequence
-import itertools
 
 from absl import app
 from absl import flags
@@ -47,23 +46,15 @@ def main(argv: Sequence[str]) -> None:
             recurrentgemma.TemporalBlockType.RECURRENT,
             recurrentgemma.TemporalBlockType.ATTENTION,
         ),
+        embeddings_scale_by_sqrt_dim=True,
+        attention_window_size=2048,
+        logits_soft_cap=30.0,
     )
   else:
     logging.info("Running RecurrentGemma 2B.")
-    # Hyper parameters of the RecurrentGemma 2B model
-    pattern = (
-        recurrentgemma.TemporalBlockType.RECURRENT,
-        recurrentgemma.TemporalBlockType.RECURRENT,
-        recurrentgemma.TemporalBlockType.ATTENTION,
-    )
-    num_layers = 26
-    config = recurrentgemma.GriffinConfig(
+    config = recurrentgemma.GriffinConfig.from_preset(
         vocab_size=256_000,
-        width=2560,
-        mlp_expanded_width=3 * 2560,
-        num_heads=10,
-        block_types=tuple(
-            itertools.islice(itertools.cycle(pattern), num_layers)),
+        preset=recurrentgemma.Preset.RECURRENT_GEMMA_2B_V1,
     )
 
   model = recurrentgemma.Griffin(config)
@@ -91,8 +82,8 @@ def main(argv: Sequence[str]) -> None:
     probs = torch.nn.functional.softmax(logits[:, -1], dim=-1)
     next_token = torch.multinomial(probs, 1)
     sampled_tokens.append(next_token)
-    logits, cache = model.forward(
-        next_token,
+    logits, cache = model(
+        tokens=next_token,
         segment_pos=pos + i,
         cache=cache,
     )

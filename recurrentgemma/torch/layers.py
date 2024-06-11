@@ -16,6 +16,7 @@
 
 from collections.abc import Sequence
 import math
+from typing import overload, Literal
 
 import einops
 from recurrentgemma.torch import array_typing as at
@@ -289,19 +290,41 @@ class RGLRU(nn.Module):
     """Initializes the `A` parameter of the RG-LRU."""
     return rnn_param_init(w, min_rad=0.9, max_rad=0.999)
 
-  @at.typed
-  def __call__(
+  @overload
+  def forward(
       self,
       x: at.ExpandedActivations,
       segment_pos: at.SegmentPos,
-      prev_h: at.RNNState | None = None,
+      cache: at.RNNState | None = None,
+      return_cache: Literal[True] = True,
   ) -> tuple[at.ExpandedActivations, at.RNNState]:
+    ...
+
+  @overload
+  def forward(
+      self,
+      x: at.ExpandedActivations,
+      segment_pos: at.SegmentPos,
+      cache: at.RNNState | None = None,
+      return_cache: Literal[False] = False,
+  ) -> tuple[at.ExpandedActivations, None]:
+    ...
+
+  @at.typed
+  def forward(
+      self,
+      x: at.ExpandedActivations,
+      segment_pos: at.SegmentPos,
+      cache: at.RNNState | None = None,
+      return_cache: bool = True,
+  ) -> tuple[at.ExpandedActivations, at.RNNState | None]:
     """Calls the RG-LRU.
 
     Args:
       x: Sequence of input activations.
       segment_pos: Position of each token in the sequence.
-      prev_h: The previous hidden state of the RG-LRU.
+      cache: The previous hidden state of the RG-LRU.
+      return_cache: Whether to compute and return the updated cache.
 
     Returns:
       Output of the block together with the updated hidden state.
@@ -333,8 +356,12 @@ class RGLRU(nn.Module):
         x=normalized_x,
         a=a,
         reset=reset,
-        h0=prev_h,
+        h0=cache,
     )
+
+    if not return_cache:
+      return y, None
+
     return y, last_h
 
   @classmethod
@@ -397,38 +424,59 @@ class Conv1D(nn.Module):
     std = math.sqrt(self.w_init_variance_scale / self.temporal_width)
     torch.nn.init.normal_(w, mean=0.0, std=std)
 
+  @overload
+  def forward(
+      self,
+      x: at.ExpandedActivations,
+      segment_pos: at.SegmentPos,
+      cache: at.Conv1DState | None = None,
+      return_cache: Literal[True] = True,
+  ) -> tuple[at.ExpandedActivations, at.Conv1DState]:
+    ...
+
+  @overload
+  def forward(
+      self,
+      x: at.ExpandedActivations,
+      segment_pos: at.SegmentPos,
+      cache: at.Conv1DState | None = None,
+      return_cache: Literal[False] = False,
+  ) -> tuple[at.ExpandedActivations, None]:
+    ...
+
   @at.typed
   def forward(
       self,
       x: at.ExpandedActivations,
       segment_pos: at.SegmentPos,
-      state: at.Conv1DState | None = None,
-  ) -> tuple[at.ExpandedActivations, at.Conv1DState]:
+      cache: at.Conv1DState | None = None,
+      return_cache: bool = True,
+  ) -> tuple[at.ExpandedActivations, at.Conv1DState | None]:
     """Calls the Conv1D.
 
     Args:
       x: Sequence of input activations.
       segment_pos: Position of each token in the sequence.
-      state: The state containing the previous `self.temporal_width-1` inputs
+      cache: The cache containing the previous `self.temporal_width-1` inputs
         This is set to `None` in training mode.
+      return_cache: Whether to compute and return the updated cache.
 
     Returns:
       The output of the convolution and the updated state.
     """
-    if state is not None:
+    output_len = x.shape[1]
+
+    if cache is not None:
       # 1. Decoding mode:
       # - We have access to the previous `self.temporal_width - 1` inputs.
-      # - Only a single token needs to be output.
-      x = self._concatenate_with_state(x, state)
+      x = self._concatenate_with_cache(x, cache)
       prompt_len = self.temporal_width - 1
-      output_len = 1
-      state_dtype = state.dtype
+      cache_dtype = cache.dtype
     else:
       # 1. Training mode:
       # - The full sequence length need to be output.
       prompt_len = 0
-      output_len = x.shape[1]
-      state_dtype = x.dtype
+      cache_dtype = x.dtype
 
     # 3. Perform the convolution:
     # - Initialize an accumulator for the convolution output.
@@ -448,7 +496,7 @@ class Conv1D(nn.Module):
       )
       x_window = x[:, start_idx:end_idx]
 
-      if state is None:
+      if cache is None:
         # - Ensure that the mask prevents accessing tokens from a different
         #   document in training mode.
         window_mask = self._compute_document_mask(
@@ -471,22 +519,25 @@ class Conv1D(nn.Module):
     # - Add the bias of the convolution.
     convolution_output += self.b[None, None]
 
-    # 4. Store the new (potentially padded) state for future decoding.
-    new_state = x[:, 1 - self.temporal_width :].type(state_dtype)
-    new_state = self._pad_state(new_state)
+    if not return_cache:
+      return convolution_output, None
 
-    return convolution_output, new_state
+    # 4. Store the new (potentially padded) cache for future decoding.
+    new_cache = x[:, 1 - self.temporal_width :].type(cache_dtype)
+    new_cache = self._pad_cache(new_cache)
 
-  def _concatenate_with_state(
+    return convolution_output, new_cache
+
+  def _concatenate_with_cache(
       self,
       x: at.ExpandedActivations,
-      state: at.Conv1DState,
+      cache: at.Conv1DState,
   ) -> at.ExpandedActivations:
-    """Concatenates the current input `x` with the previous state for decoding.
+    """Concatenates the current input `x` with the previous cache for decoding.
 
     Args:
       x: The current input activations (shape: [batch_size, 1, width]).
-      state: State tensor storing previous inputs (shape: [batch_size,
+      cache: Cached tensor storing previous inputs (shape: [batch_size,
         temporal_width - 1, width]).
 
     Returns:
@@ -494,9 +545,9 @@ class Conv1D(nn.Module):
       (shape: [batch_size, temporal_width, width]).
     """
     b, num_tokens, d = x.shape
-    assert state.shape == (b, self.temporal_width - 1, d)
+    assert cache.shape == (b, self.temporal_width - 1, d)
     assert num_tokens == 1
-    return torch.concatenate([state.type(x.dtype), x], dim=1)
+    return torch.concatenate([cache.type(x.dtype), x], dim=1)
 
   def _convolution_window_indices(
       self,
@@ -570,7 +621,7 @@ class Conv1D(nn.Module):
     )
     return torch.concatenate([padding, window], dim=1)
 
-  def _pad_state(
+  def _pad_cache(
       self,
       state: at.Conv1DState,
   ) -> at.Conv1DState:
@@ -647,6 +698,6 @@ class Einsum(nn.Module):
     torch.nn.init.normal_(w, mean=0.0, std=std)
 
   @at.typed
-  def __call__(self, x: torch.Tensor) -> torch.Tensor:
+  def forward(self, x: torch.Tensor) -> torch.Tensor:
     """Calls the Einsum."""
     return torch.einsum(self.eqn, x, self.w) + self.b

@@ -71,7 +71,8 @@ def numerically_compare_modules(
   """Compares numerically Jax and PyTorch modules."""
   x_rng, y_rng, init_rng = jax.random.split(jax.random.PRNGKey(seed), 3)
   x = generate_input(x_rng, input_shape, dtype, vocab_size)
-  segment_pos = jnp.repeat(jnp.arange(input_shape[1] // 2), 2, axis=0)[None]
+  segment_pos_half = jnp.arange(input_shape[1] // 2)
+  segment_pos = jnp.concatenate([segment_pos_half, segment_pos_half])[None]
   jax_args = [x, segment_pos] if uses_segment_pos else [x]
   torch_args = [conversion.jax_array_to_torch_tensor(xi) for xi in jax_args]
 
@@ -82,14 +83,11 @@ def numerically_compare_modules(
   # Forward pass
   jax_outputs = jax_module.apply(dict(params=params), *jax_args)
   torch_outputs = torch_module(*torch_args)
+
   compare_jax_to_torch(jax_outputs, torch_outputs, tols)
 
   if not has_cache or num_unroll_steps == 0:
     return
-
-  _, jax_cache = jax_outputs
-  _, torch_cache = torch_outputs
-  compare_jax_to_torch(jax_cache, torch_cache, tols)
 
   # Sampling
   segment_pos = jax_args[1][:, -1:] + 1
@@ -97,13 +95,13 @@ def numerically_compare_modules(
   y = generate_input(y_rng, y_shape, dtype, vocab_size)
 
   for i in range(num_unroll_steps):
+    _, jax_cache = jax_outputs
+    _, torch_cache = torch_outputs
+
     jax_args = [y[:, i : i + 1], segment_pos + i]
     torch_args = [conversion.jax_array_to_torch_tensor(xi) for xi in jax_args]
 
-    jax_output, jax_cache = jax_module.apply(
-        dict(params=params), *jax_args, jax_cache
-    )
-    torch_output, torch_cache = torch_module(*torch_args, torch_cache)
+    jax_outputs = jax_module.apply(dict(params=params), *jax_args, jax_cache)
+    torch_outputs = torch_module(*torch_args, torch_cache)
 
-    compare_jax_to_torch(jax_output, torch_output, tols)
-    compare_jax_to_torch(jax_cache, torch_cache, tols)
+    compare_jax_to_torch(jax_outputs, torch_outputs, tols)

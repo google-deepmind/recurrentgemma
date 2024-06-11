@@ -25,6 +25,7 @@ from recurrentgemma.jax import utils
 
 ScanType = common.ScanType
 TemporalBlockType = common.TemporalBlockType
+Preset = common.Preset
 GriffinConfig = common.GriffinConfig
 PallasShardingSpec = pallas.PallasShardingSpec
 sharded_lru = pallas.sharded_lru
@@ -58,6 +59,7 @@ __all__ = (
     "LocalAttentionBlock",
     "ResidualBlockCache",
     "ResidualBlock",
+    "Preset",
     "GriffinConfig",
     "Griffin",
     "Sampler",

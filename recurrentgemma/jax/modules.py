@@ -13,8 +13,8 @@
 # limitations under the License.
 # ============================================================================
 """Griffin and Hawk"s model components."""
-
-from typing import NamedTuple
+import functools
+from typing import Literal, overload, NamedTuple
 import einops
 from flax import linen as nn
 import jax
@@ -27,6 +27,7 @@ from recurrentgemma.jax import pallas
 
 _MIN_LOGITS_VALUE = -2.3819763e38  # Set to a large negative number.
 _MAX_WAVELENGTH = 10_000
+_vmap_cache_roll = jax.vmap(functools.partial(jnp.roll, axis=0))
 
 
 @at.typed
@@ -150,23 +151,31 @@ def _compute_forward_pass_mask(
 
 @at.typed
 def _compute_cache_mask(
-    num_tokens: at.NumTokens,
+    seq_len: int,
+    cache_num_tokens: at.NumTokens,
     window_size: int,
 ) -> at.AttentionMask:
   """Computes the mask when there a KV-cache is present.
 
   Args:
-    num_tokens: The number of active tokens currently stored in the KV-cache.
+    seq_len: The sequence length of the prompt.
+    cache_num_tokens: The number of active tokens currently stored in the
+      KV-cache.
     window_size: The local attention window size.
 
   Returns:
     The mask that needs to be applied to the logits when performing a single
     inference step with a KV-cache of the local attention.
   """
-  q_positions = num_tokens[:, None]
-  k_positions = jnp.arange(window_size + 1) - window_size
-  k_positions = jnp.repeat(k_positions[None], q_positions.shape[0], axis=0)
-  k_positions = k_positions + num_tokens[:, None]
+  q_positions = jnp.arange(seq_len)[None] + cache_num_tokens[:, None]
+
+  k = cache_num_tokens[:, None] // window_size
+  idx = jnp.arange(window_size)
+  k_positions_now = idx[None] + k * window_size
+  k_position_prev = idx[None] + (k - 1) * window_size
+  mask = k_positions_now < cache_num_tokens[:, None]
+  k_positions = mask * k_positions_now + (1 - mask) * k_position_prev
+  k_positions = jnp.concatenate([k_positions, q_positions], axis=-1)
   return _compute_causal_mask(q_positions, k_positions, window_size, None, None)
 
 
@@ -174,6 +183,7 @@ def _compute_cache_mask(
 def _update_attention_cache(
     keys: at.Keys,
     values: at.Values,
+    segment_pos: at.SegmentPos,
     cache: AttentionBlockCache,
 ) -> AttentionBlockCache:
   """Updates the cache with the new keys and values.
@@ -181,22 +191,32 @@ def _update_attention_cache(
   Args:
     keys: The new keys to be added to the cache.
     values: The new values to be added to the cache.
+    segment_pos: Positions of each token in the sequence.
     cache: The dictionary with the cache to be updated.
 
   Returns:
     The updated cache dictionary.
   """
-  l = keys.shape[-3]
+  seq_len = keys.shape[-3]
   window_size = cache.keys.shape[-3]
-  n_fill = min(window_size, l)
+  n_fill = min(window_size, seq_len)
 
-  new_keys = [cache.keys[:, n_fill:], keys[:, -n_fill:]]
-  new_values = [cache.values[:, n_fill:], values[:, -n_fill:]]
-  return AttentionBlockCache(
-      keys=jnp.concatenate(new_keys, axis=-3),
-      values=jnp.concatenate(new_values, axis=-3),
-      num_tokens=cache.num_tokens + keys.shape[-3],
-  )
+  if n_fill == 1:
+    # Autogregressive sampling.
+    idx0 = jnp.arange(keys.shape[0])
+    idx1 = cache.num_tokens % window_size
+    return AttentionBlockCache(
+        keys=cache.keys.at[idx0, idx1].set(keys[:, 0]),
+        values=cache.values.at[idx0, idx1].set(values[:, 0]),
+        num_tokens=cache.num_tokens + 1,
+    )
+
+  elif n_fill == window_size:
+    # Processing a prompt in chunks.
+    return _attention_cache_from_prompt(keys, values, segment_pos, window_size)
+
+  else:
+    raise NotImplementedError()
 
 
 @at.typed
@@ -218,11 +238,17 @@ def _attention_cache_from_prompt(
     An empty initialized KV-cache updated with the given keys and values.
   """
   w = min(window_size, keys.shape[1])
-  padding = [[0, 0], [window_size - w, 0], [0, 0], [0, 0]]
+  padding = [[0, 0], [0, window_size - w], [0, 0], [0, 0]]
+  num_tokens = segment_pos[:, -1] + 1
+
+  # This ensures that the keys and values are right padded in the cache.
+  right_padded_keys = _vmap_cache_roll(keys[:, -w:], num_tokens)
+  right_padded_values = _vmap_cache_roll(values[:, -w:], num_tokens)
+
   return AttentionBlockCache(
-      keys=jnp.pad(keys[:, -w:], padding),
-      values=jnp.pad(values[:, -w:], padding),
-      num_tokens=segment_pos[:, -1] + 1,
+      keys=jnp.pad(right_padded_keys, padding),
+      values=jnp.pad(right_padded_values, padding),
+      num_tokens=num_tokens,
   )
 
 
@@ -304,19 +330,41 @@ class LocalAttentionBlock(nn.Module):
         param_dtype=self.param_dtype,
     )
 
+  @overload
+  def __call__(
+      self,
+      x: at.Activations,
+      segment_pos: at.SegmentPos,
+      cache: AttentionBlockCache | None = None,
+      return_cache: Literal[True] = True,
+  ) -> tuple[at.Activations, AttentionBlockCache]:
+    ...
+
+  @overload
+  def __call__(
+      self,
+      x: at.Activations,
+      segment_pos: at.SegmentPos,
+      cache: AttentionBlockCache | None = None,
+      return_cache: Literal[False] = False,
+  ) -> tuple[at.Activations, None]:
+    ...
+
   @at.typed
   def __call__(
       self,
       x: at.Activations,
       segment_pos: at.SegmentPos,
       cache: AttentionBlockCache | None = None,
-  ) -> tuple[at.Activations, AttentionBlockCache]:
+      return_cache: bool = True,
+  ) -> tuple[at.Activations, AttentionBlockCache | None]:
     """Calls the local attention block.
 
     Args:
       x: Sequence of input activations.
       segment_pos: Positions of each token in the sequence.
       cache: Optiona KV-cache for the block, of previous keys and values.
+      return_cache: Whether to compute and return the updated cache.
 
     Returns:
       Output of the block together with the updated cache. If `cache` is None
@@ -341,21 +389,28 @@ class LocalAttentionBlock(nn.Module):
     keys = _apply_rope(keys, segment_pos)
 
     if cache is not None:
-      assert t == 1, f"When cache is provided only `t=1` is supported, not {t=}"
+      no_cache_keys, no_cache_values = keys, values
 
-      new_cache = _update_attention_cache(keys, values, cache)
+      keys = jnp.concatenate([cache.keys, no_cache_keys], axis=-3)
+      values = jnp.concatenate([cache.values, no_cache_values], axis=-3)
+      attn_mask = _compute_cache_mask(t, cache.num_tokens, self.window_size)
 
-      attn_mask = _compute_cache_mask(cache.num_tokens, self.window_size)
-
-      keys = jnp.concatenate([cache.keys, keys], axis=-3)
-      values = jnp.concatenate([cache.values, values], axis=-3)
+      if return_cache:
+        new_cache = _update_attention_cache(
+            no_cache_keys, no_cache_values, segment_pos, cache
+        )
+      else:
+        new_cache = None
 
     else:
-      new_cache = _attention_cache_from_prompt(
-          keys, values, segment_pos, self.window_size
-      )
-
       attn_mask = _compute_forward_pass_mask(segment_pos, self.window_size)
+
+      if return_cache:
+        new_cache = _attention_cache_from_prompt(
+            keys, values, segment_pos, self.window_size
+        )
+      else:
+        new_cache = None
 
     # Compute attention.
     logits = einops.einsum(queries, keys, "b t n h, b s n h -> b n t s")
@@ -477,19 +532,41 @@ class RecurrentBlock(nn.Module):
         param_dtype=self.param_dtype,
     )
 
+  @overload
+  def __call__(
+      self,
+      x: at.Activations,
+      segment_pos: at.SegmentPos,
+      cache: RecurrentBlockCache | None = None,
+      return_cache: Literal[True] = True,
+  ) -> tuple[at.Activations, RecurrentBlockCache]:
+    ...
+
+  @overload
+  def __call__(
+      self,
+      x: at.Activations,
+      segment_pos: at.SegmentPos,
+      cache: RecurrentBlockCache | None = None,
+      return_cache: Literal[False] = False,
+  ) -> tuple[at.Activations, None]:
+    ...
+
   @at.typed
   def __call__(
       self,
       x: at.Activations,
       segment_pos: at.SegmentPos,
       cache: RecurrentBlockCache | None = None,
-  ) -> tuple[at.Activations, RecurrentBlockCache]:
+      return_cache: bool = True,
+  ) -> tuple[at.Activations, RecurrentBlockCache | None]:
     """Calls the recurrent block.
 
     Args:
       x: Sequence of input activations.
       segment_pos: Position of each token in the sequence.
       cache: Optional cache with the previous state of the RG-LRU and Conv1D.
+      return_cache: Whether to compute and return the updated cache.
 
     Returns:
       Output of the block together with the updated cache. If `cache` is None
@@ -502,20 +579,26 @@ class RecurrentBlock(nn.Module):
 
     # x branch.
     x = self.linear_x(x)
+
     x, conv1d_state = self.conv_1d(
         x=x,
         segment_pos=segment_pos,
-        state=None if cache is None else cache.conv1d_state,
+        cache=None if cache is None else cache.conv1d_state,
+        return_cache=return_cache,
     )
     x, rg_lru_state = self.lru(
         x=x,
         segment_pos=segment_pos,
-        prev_h=None if cache is None else cache.rg_lru_state,
+        cache=None if cache is None else cache.rg_lru_state,
+        return_cache=return_cache,
     )
 
     # Join branches.
     x = x * y
     x = self.linear_out(x)
+
+    if not return_cache:
+      return x, None
 
     return x, RecurrentBlockCache(
         rg_lru_state=rg_lru_state,
@@ -703,19 +786,41 @@ class ResidualBlock(nn.Module):
       case common.TemporalBlockType.ATTENTION:
         return self.attention_block
 
+  @overload
+  def __call__(
+      self,
+      x: at.Activations,
+      segment_pos: at.SegmentPos,
+      cache: ResidualBlockCache | None = None,
+      return_cache: Literal[True] = True,
+  ) -> tuple[at.Activations, ResidualBlockCache]:
+    ...
+
+  @overload
+  def __call__(
+      self,
+      x: at.Activations,
+      segment_pos: at.SegmentPos,
+      cache: ResidualBlockCache | None = None,
+      return_cache: Literal[False] = False,
+  ) -> tuple[at.Activations, None]:
+    ...
+
   @at.typed
   def __call__(
       self,
       x: at.Activations,
       segment_pos: at.SegmentPos,
       cache: ResidualBlockCache | None = None,
-  ) -> tuple[at.Activations, ResidualBlockCache]:
+      return_cache: bool = True,
+  ) -> tuple[at.Activations, ResidualBlockCache | None]:
     """Calls the residual block.
 
     Args:
       x: Sequence of input activations.
       segment_pos: Positions of each token in the sequence.
       cache: Optional cache for the block.
+      return_cache: Whether to compute and return the updated cache.
 
     Returns:
       Output of the block together with the updated cache. If `cache` is None
@@ -725,7 +830,9 @@ class ResidualBlock(nn.Module):
     raw_x = x
 
     inputs_normalized = self.temporal_pre_norm(raw_x)
-    x, cache = self.temporal_block(inputs_normalized, segment_pos, cache)
+    x, cache = self.temporal_block(
+        inputs_normalized, segment_pos, cache, return_cache=return_cache
+    )
 
     residual = x + raw_x
 

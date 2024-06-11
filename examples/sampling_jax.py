@@ -70,7 +70,10 @@ def _load_and_sample(
   # Create a sampler with the right param shapes.
   vocab = spm.SentencePieceProcessor()
   vocab.Load(path_tokenizer)
-  config = recurrentgemma.GriffinConfig.from_flax_params_or_variables(params)
+  config = recurrentgemma.GriffinConfig.from_flax_params_or_variables(
+      params,
+      preset=recurrentgemma.Preset.RECURRENT_GEMMA_2B_V1,
+  )
   model = recurrentgemma.Griffin(config)
   sampler = recurrentgemma.Sampler(model=model, vocab=vocab, params=params)
   sampled_output = sampler(

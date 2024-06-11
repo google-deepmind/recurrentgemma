@@ -50,9 +50,10 @@ class EmbedderTest(parameterized.TestCase):
         width=embed_dim,
         mlp_expanded_width=0,
         num_heads=0,
-        embeddings_scale_by_sqrt_dim=scale_by_sqrt_dim,
         block_types=tuple(),
-        logits_soft_cap=None,
+        embeddings_scale_by_sqrt_dim=scale_by_sqrt_dim,
+        attention_window_size=2048,
+        logits_soft_cap=30.0,
     )
     test_utils.numerically_compare_modules(
         jax_module=jax_griffin.Griffin(

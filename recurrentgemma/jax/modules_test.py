@@ -91,22 +91,22 @@ class LocalAttentionTest(parameterized.TestCase):
     # Produce a new cache.
     (_, new_cache), _ = block.init_with_output(key, x, segment_pos, cache)
 
-    # Check except the last index, the cache is zero
-    np.testing.assert_array_almost_equal(new_cache.keys[:, :-1], 0.0)
-    np.testing.assert_array_almost_equal(new_cache.values[:, :-1], 0.0)
+    # Check except the first index, the cache is zero
+    np.testing.assert_array_almost_equal(new_cache.keys[:, 1:], 0.0)
+    np.testing.assert_array_almost_equal(new_cache.values[:, 1:], 0.0)
     np.testing.assert_array_almost_equal(new_cache.num_tokens, 1)
 
-    # And check that the last index is not zero
+    # And check that the first index is not zero
     np.testing.assert_raises(
         AssertionError,
         np.testing.assert_array_almost_equal,
-        new_cache.keys[:, -1],
+        new_cache.keys[:, 0],
         0.0,
     )
     np.testing.assert_raises(
         AssertionError,
         np.testing.assert_array_almost_equal,
-        new_cache.values[:, -1],
+        new_cache.values[:, 0],
         0.0,
     )
 

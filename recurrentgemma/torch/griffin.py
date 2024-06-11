@@ -13,6 +13,8 @@
 # limitations under the License.
 # ============================================================================
 """Griffin model."""
+from typing import Literal, overload
+
 from recurrentgemma import common
 from recurrentgemma.torch import array_typing as at
 from recurrentgemma.torch import layers
@@ -82,25 +84,76 @@ class Griffin(nn.Module):
       block.reset_parameters()
     self.final_norm.reset_parameters()
 
+  @overload
+  def forward(
+      self,
+      tokens: at.Tokens,
+      segment_pos: at.SegmentPos,
+      cache: Cache | None = None,
+      return_logits: Literal[False] = False,
+      return_cache: Literal[False] = False,
+  ) -> tuple[None, None]:
+    ...
+
+  @overload
+  def forward(
+      self,
+      tokens: at.Tokens,
+      segment_pos: at.SegmentPos,
+      cache: Cache | None = None,
+      return_logits: Literal[False] = False,
+      return_cache: Literal[True] = True,
+  ) -> tuple[None, Cache]:
+    ...
+
+  @overload
+  def forward(
+      self,
+      tokens: at.Tokens,
+      segment_pos: at.SegmentPos,
+      cache: Cache | None = None,
+      return_logits: Literal[True] = True,
+      return_cache: Literal[False] = False,
+  ) -> tuple[at.TokenLogits, None]:
+    ...
+
+  @overload
+  def forward(
+      self,
+      tokens: at.Tokens,
+      segment_pos: at.SegmentPos,
+      cache: Cache | None = None,
+      return_logits: Literal[True] = True,
+      return_cache: Literal[True] = True,
+  ) -> tuple[at.TokenLogits, Cache]:
+    ...
+
   @at.typed
   def forward(
       self,
       tokens: at.Tokens,
       segment_pos: at.SegmentPos,
       cache: Cache | None = None,
-  ) -> tuple[at.TokenLogits, Cache]:
+      return_logits: bool = True,
+      return_cache: bool = True,
+  ) -> tuple[at.TokenLogits | None, Cache | None]:
     """Calls Griffin.
 
     Args:
       tokens: Sequence of input tokens.
       segment_pos: Positions of each token in the sequence.
       cache: Optiona for the model.
+      return_logits: Whether to compute and return the logits.
+      return_cache: Whether to compute and return the updated cache.
 
     Returns:
       Output of the model together with the updated cache. If `cache` is None
       than the returned updated cache is empty initialized and filled in from
       the input sequence.
     """
+    if not return_logits and not return_cache:
+      return None, None
+
     input_emb = self.embedder.encode(tokens)
     x = input_emb
 
@@ -114,18 +167,25 @@ class Griffin(nn.Module):
             x,
             segment_pos,
             block_cache,
+            return_cache,
             use_reentrant=False,
             determinism_check="none",
         )
       else:
         x, new_cache[block_name] = block(x, segment_pos, block_cache)
 
+    if not return_logits:
+      return None, new_cache
+
     x = self.final_norm(x)
     logits = self.embedder.decode(x)
 
     c = self.config.logits_soft_cap
-    if c is not None:
+    if c:
       logits = nn.functional.tanh(logits / c) * c
+
+    if not return_cache:
+      return logits, None
 
     return logits, new_cache
 

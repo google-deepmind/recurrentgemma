@@ -14,8 +14,8 @@
 # ============================================================================
 """Utilities for both the Jax and Pytorch modules."""
 
-from collections.abc import Sequence
 import enum
+import itertools
 from typing import Any, NamedTuple, Mapping
 
 
@@ -43,10 +43,75 @@ class ScanType(enum.Enum):
 
 
 @enum.unique
-class GriffinPreset(enum.Enum):
+class Preset(enum.Enum):
   """All default preset variants."""
 
+  GRIFFIN_PAPER_7B = enum.auto()
+  HAWK_PAPER_7B = enum.auto()
   RECURRENT_GEMMA_2B_V1 = enum.auto()
+  RECURRENT_GEMMA_9B_V1 = enum.auto()
+
+  @property
+  def config_dict(self) -> dict[str, Any]:
+    griffin_pattern = itertools.cycle([
+        TemporalBlockType.RECURRENT,
+        TemporalBlockType.RECURRENT,
+        TemporalBlockType.ATTENTION,
+    ])
+
+    match self:
+
+      case Preset.GRIFFIN_PAPER_7B:
+        return dict(
+            width=4096,
+            mlp_expanded_width=3 * 4096,
+            num_heads=32,
+            lru_width=5632,
+            block_types=tuple(itertools.islice(griffin_pattern, 32)),
+            embeddings_scale_by_sqrt_dim=False,
+            attention_window_size=1024,
+            logits_soft_cap=0.0,
+            scan_type=ScanType.AUTO,
+        )
+
+      case Preset.HAWK_PAPER_7B:
+        return dict(
+            width=4096,
+            mlp_expanded_width=3 * 4096,
+            num_heads=32,
+            lru_width=5632,
+            block_types=(TemporalBlockType.RECURRENT,) * 32,
+            embeddings_scale_by_sqrt_dim=False,
+            attention_window_size=1024,
+            logits_soft_cap=0.0,
+            scan_type=ScanType.AUTO,
+        )
+
+      case Preset.RECURRENT_GEMMA_2B_V1:
+        return dict(
+            width=2560,
+            mlp_expanded_width=3 * 2560,
+            num_heads=10,
+            lru_width=2560,
+            block_types=tuple(itertools.islice(griffin_pattern, 26)),
+            embeddings_scale_by_sqrt_dim=True,
+            attention_window_size=2048,
+            logits_soft_cap=30.0,
+            scan_type=ScanType.AUTO,
+        )
+
+      case Preset.RECURRENT_GEMMA_9B_V1:
+        return dict(
+            width=4096,
+            mlp_expanded_width=3 * 4096,
+            num_heads=16,
+            lru_width=4096,
+            block_types=tuple(itertools.islice(griffin_pattern, 38)),
+            embeddings_scale_by_sqrt_dim=True,
+            attention_window_size=2048,
+            logits_soft_cap=30.0,
+            scan_type=ScanType.AUTO,
+        )
 
 
 class GriffinConfig(NamedTuple):
@@ -63,14 +128,14 @@ class GriffinConfig(NamedTuple):
     block_types: A sequence containing the type of the residual blocks in the
       architecture, specifying each block in order if it should use a recurrent
       or an attention sub-block for the temporal-mixing.
-    lru_width: The width of the RG-LRU if different from `width`.
     embeddings_scale_by_sqrt_dim: Whether to scale the output of the embeddings
       by `sqrt(width)`.
     attention_window_size: The size of the attention window used in the
       attention block.
     logits_soft_cap: This will cap the values of the final logits to not exceed
-      this cap in absolute value by applying a `tanh`. If `None` no capping is
+      this cap in absolute value by applying a `tanh`. If `0` no capping is
       applied.
+    lru_width: The width of the RG-LRU if different from `width`.
     scan_type: If running Flax, this specifies which implementation to use for
       the scan in the RG-LRU.
   """
@@ -80,10 +145,10 @@ class GriffinConfig(NamedTuple):
   mlp_expanded_width: int
   num_heads: int
   block_types: tuple[TemporalBlockType, ...]
+  embeddings_scale_by_sqrt_dim: bool
+  attention_window_size: int
+  logits_soft_cap: float
   lru_width: int | None = None
-  embeddings_scale_by_sqrt_dim: bool = True
-  attention_window_size: int = 2048
-  logits_soft_cap: float | None = 30.0
   scan_type: ScanType = ScanType.AUTO
 
   @property
@@ -99,49 +164,102 @@ class GriffinConfig(NamedTuple):
   @classmethod
   def from_preset(
       cls,
-      vocab_size: int,
-      width: int,
-      mlp_expanded_width: int,
-      num_heads: int,
-      lru_width: int,
-      block_types: Sequence[TemporalBlockType],
-      preset: GriffinPreset,
+      preset: Preset,
+      vocab_size: int = 256_000,
       max_sequence_length: int | None = None,
   ) -> "GriffinConfig":
     """Creates a `GriffinConfig` for a given preset."""
-    match preset:
-      case GriffinPreset.RECURRENT_GEMMA_2B_V1:
-        return cls(
-            vocab_size=vocab_size,
-            width=width,
-            mlp_expanded_width=mlp_expanded_width,
-            num_heads=num_heads,
-            lru_width=lru_width,
-            block_types=tuple(block_types),
-            embeddings_scale_by_sqrt_dim=True,
-            attention_window_size=min(2048, max_sequence_length or 2048),
-            logits_soft_cap=30.0,
-            scan_type=ScanType.AUTO,
-        )
+    cls_kwargs = preset.config_dict
+    if max_sequence_length is not None:
+      w = min(cls_kwargs["attention_window_size"], max_sequence_length)
+      cls_kwargs["attention_window_size"] = w
+
+    return cls(vocab_size=vocab_size, **cls_kwargs)
+
+  @classmethod
+  def _from_parameter_kwargs(
+      cls,
+      kwargs: dict[str, int | tuple[TemporalBlockType, ...]],
+      preset: Preset | None = None,
+      embeddings_scale_by_sqrt_dim: bool | None = None,
+      attention_window_size: int | None = None,
+      logits_soft_cap: float | None = None,
+      scan_type: ScanType = ScanType.AUTO,
+      max_sequence_length: int | None = None,
+  ):
+    """Creates a `GriffinConfig` from kwargs inferred from parameters."""
+    if preset is not None:
+      # Verify that the kwargs match the preset
+      default_kwargs = preset.config_dict
+      for key, value in kwargs.items():
+        if key != "vocab_size" and value != default_kwargs[key]:
+          raise ValueError(
+              "The parameters provided does not seem to match the preset "
+              f"{preset} provided, because the value for {key} is {value}, "
+              "which is not equal to the preset value of "
+              f"{default_kwargs[key]}."
+          )
+
+    else:
+      default_kwargs = {}
+
+    special_kwargs = dict(
+        embeddings_scale_by_sqrt_dim=embeddings_scale_by_sqrt_dim,
+        attention_window_size=attention_window_size,
+        logits_soft_cap=logits_soft_cap,
+        scan_type=scan_type,
+    )
+
+    cls_kwargs = dict(**kwargs)
+    for key, value in special_kwargs.items():
+      cls_kwargs[key] = value if value is not None else default_kwargs.get(key)
+
+    if max_sequence_length is not None:
+      w = min(cls_kwargs["attention_window_size"], max_sequence_length)
+      cls_kwargs["attention_window_size"] = w
+
+    return cls(**cls_kwargs)
 
   @classmethod
   def from_flax_params_or_variables(
       cls,
       flax_params_or_variables: Mapping[str, Any],
+      preset: Preset | None = None,
+      embeddings_scale_by_sqrt_dim: bool | None = None,
+      attention_window_size: int | None = None,
+      logits_soft_cap: float | None = None,
+      scan_type: ScanType = ScanType.AUTO,
       max_sequence_length: int | None = None,
-      preset: GriffinPreset = GriffinPreset.RECURRENT_GEMMA_2B_V1,
   ) -> "GriffinConfig":
     """Creates a `GriffinConfig` from Flax parameters.
 
     Args:
       flax_params_or_variables: The Flax parameters or variables (a dict
-        containing a key 'params' corresponding to the actual parameters) to
-        use to reconstruct the config.
+        containing a key 'params' corresponding to the actual parameters) to use
+        to reconstruct the config.
+      preset: The expected preset from which the parameters have been derived.
+        If this is set values for hyper parameters that can't be inferred from
+        the parameter, such as `embeddings_scale_by_sqrt_dim`,
+        `attention_window_size`, `logits_soft_cap`, `scan_type`, will be taken
+        from the preset, unless the corresponding argument to this method is
+        set, in which case that will take precedence.
+      embeddings_scale_by_sqrt_dim: Whether to scale the output of the
+        embeddings by `sqrt(width)`. If this is `None` it is taken from the
+        `preset` hypers. This argument or `preset` must be set.
+      attention_window_size: The size of the attention window used in the
+        attention block. If this is `None` it is taken from the `preset` hypers.
+        This argument or `preset` must be set.
+      logits_soft_cap: This will cap the values of the final logits to not
+        exceed this cap in absolute value by applying a `tanh`. If this is
+        `None` it is taken from the `preset` hypers. This argument or `preset`
+        must be set.
+      scan_type: If running Flax, this specifies which implementation to use for
+        the scan in the RG-LRU. If this is `None` it is taken from the `preset`
+        hypers. This argument or `preset` must be set.
       max_sequence_length: The maximum sequence length this models is intended
         to process. If this is lower than 2048, the `attention_window_size` will
         best to this value instead, in order to not create a cache that is
         larger than necessary.
-      preset: Which model preset is being loaded.
 
     Returns:
       The reconstructed `GriffinConfig`.
@@ -184,28 +302,61 @@ class GriffinConfig(NamedTuple):
 
       i += 1
 
-    return cls.from_preset(
-        vocab_size=vocab_size,
-        width=width,
-        mlp_expanded_width=mlp_exp_width,
-        num_heads=num_heads,
-        lru_width=lru_width,
-        block_types=tuple(block_types),
-        max_sequence_length=max_sequence_length,
+    return cls._from_parameter_kwargs(
+        kwargs=dict(
+            vocab_size=vocab_size,
+            width=width,
+            mlp_expanded_width=mlp_exp_width,
+            num_heads=num_heads,
+            lru_width=lru_width,
+            block_types=tuple(block_types),
+        ),
         preset=preset,
+        embeddings_scale_by_sqrt_dim=embeddings_scale_by_sqrt_dim,
+        attention_window_size=attention_window_size,
+        logits_soft_cap=logits_soft_cap,
+        scan_type=scan_type,
+        max_sequence_length=max_sequence_length,
     )
 
   @classmethod
   def from_torch_params(
       cls,
       params: dict[str, Any],
-      preset: GriffinPreset = GriffinPreset.RECURRENT_GEMMA_2B_V1,
+      preset: Preset | None = None,
+      embeddings_scale_by_sqrt_dim: bool | None = None,
+      attention_window_size: int | None = None,
+      logits_soft_cap: float | None = None,
+      scan_type: ScanType | None = None,
+      max_sequence_length: int | None = None,
   ) -> "GriffinConfig":
     """Creates a `GriffinConfig` from Pytorch parameters.
 
     Args:
       params: The Pytorch parameters to use to reconstruct the config.
-      preset: Which model preset is being loaded.
+      preset: The expected preset from which the parameters have been derived.
+        If this is set values for hyper parameters that can't be inferred from
+        the parameter, such as `embeddings_scale_by_sqrt_dim`,
+        `attention_window_size`, `logits_soft_cap`, `scan_type, will be taken
+        from the preset, unless the corresponding argument to this method is
+        set, in which case that will take precedence.
+      embeddings_scale_by_sqrt_dim: Whether to scale the output of the
+        embeddings by `sqrt(width)`. If this is `None` it is taken from the
+        `preset` hypers. This argument or `preset` must be set.
+      attention_window_size: The size of the attention window used in the
+        attention block. If this is `None` it is taken from the `preset` hypers.
+        This argument or `preset` must be set.
+      logits_soft_cap: This will cap the values of the final logits to not
+        exceed this cap in absolute value by applying a `tanh`. If this is
+        `None` it is taken from the `preset` hypers. This argument or `preset`
+        must be set.
+      scan_type: If running Flax, this specifies which implementation to use for
+        the scan in the RG-LRU. If this is `None` it is taken from the `preset`
+        hypers. This argument or `preset` must be set.
+      max_sequence_length: The maximum sequence length this models is intended
+        to process. If this is lower than 2048, the `attention_window_size` will
+        be set to this value instead, in order to not create a cache that is
+        larger than necessary.
 
     Returns:
       The reconstructed `GriffinConfig`.
@@ -240,12 +391,23 @@ class GriffinConfig(NamedTuple):
 
       i += 1
 
-    return cls.from_preset(
-        vocab_size=vocab_size,
-        width=width,
-        mlp_expanded_width=mlp_exp_width,
-        num_heads=num_heads,
-        lru_width=lru_width,
-        block_types=tuple(block_types),
+    return cls._from_parameter_kwargs(
+        kwargs=dict(
+            vocab_size=vocab_size,
+            width=width,
+            mlp_expanded_width=mlp_exp_width,
+            num_heads=num_heads,
+            lru_width=lru_width,
+            block_types=tuple(block_types),
+        ),
         preset=preset,
+        embeddings_scale_by_sqrt_dim=embeddings_scale_by_sqrt_dim,
+        attention_window_size=attention_window_size,
+        logits_soft_cap=logits_soft_cap,
+        scan_type=scan_type,
+        max_sequence_length=max_sequence_length,
     )
+
+
+def apply_it_formatter(input_string: str) -> str:
+  return f"<start_of_turn>user\n{input_string}<end_of_turn>\n<start_of_turn>model\n"

@@ -67,15 +67,18 @@ def _load_and_sample(
   """Loads and samples a string from a checkpoint."""
   device = "cuda" if torch.cuda.is_available() else "cpu"
   print(f"Loading the parameters from {path_checkpoint}")
-  parameters = torch.load(path_checkpoint)
-  parameters = {k: v.to(device=device) for k, v in parameters.items()}
+  params = torch.load(path_checkpoint)
+  params = {k: v.to(device=device) for k, v in params.items()}
   print("Parameters loaded.")
   # Create a sampler with the right param shapes.
   vocab = spm.SentencePieceProcessor()
   vocab.Load(path_tokenizer)
-  config = recurrentgemma.GriffinConfig.from_torch_params(parameters)
+  config = recurrentgemma.GriffinConfig.from_torch_params(
+      params,
+      preset=recurrentgemma.Preset.RECURRENT_GEMMA_2B_V1,
+  )
   model = recurrentgemma.Griffin(config, device=device, dtype=torch.bfloat16)
-  model.load_state_dict(parameters)
+  model.load_state_dict(params)
   sampler = recurrentgemma.Sampler(model=model, vocab=vocab)
   sampler_output = sampler(
       input_strings=[input_string],

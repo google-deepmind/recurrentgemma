@@ -56,13 +56,14 @@ class GriffinTest(parameterized.TestCase):
         width=width,
         mlp_expanded_width=mlp_expanded_width,
         num_heads=num_heads,
-        attention_window_size=attention_window_size,
-        scan_type=common.ScanType.LINEAR_NATIVE,
-        embeddings_scale_by_sqrt_dim=scale_by_sqrt_dim,
         block_types=(
             common.TemporalBlockType.RECURRENT,
             common.TemporalBlockType.ATTENTION,
         ),
+        embeddings_scale_by_sqrt_dim=scale_by_sqrt_dim,
+        attention_window_size=attention_window_size,
+        logits_soft_cap=30.0,
+        scan_type=common.ScanType.LINEAR_NATIVE,
     )
     test_utils.numerically_compare_modules(
         jax_module=jax_griffin.Griffin(

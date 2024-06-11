@@ -41,8 +41,10 @@ class GriffinTest(absltest.TestCase):
         mlp_expanded_width=3 * width,
         num_heads=num_heads,
         lru_width=2 * width,
-        attention_window_size=4,
         block_types=block_types,
+        embeddings_scale_by_sqrt_dim=True,
+        attention_window_size=4,
+        logits_soft_cap=30.0,
     )
     backbone = griffin.Griffin(config)
     key = jax.random.PRNGKey(0)
@@ -70,8 +72,7 @@ class GriffinTest(absltest.TestCase):
               (batch_size, 3, config.lru_width),
           )
           self.assertEqual(
-              block_cache.rg_lru_state.shape,
-              (batch_size, config.lru_width)
+              block_cache.rg_lru_state.shape, (batch_size, config.lru_width)
           )
 
         case common.TemporalBlockType.ATTENTION:

@@ -14,6 +14,8 @@
 # ============================================================================
 """Griffin model."""
 
+from typing import Literal, overload
+
 from flax import linen as nn
 import jax.numpy as jnp
 from recurrentgemma import common
@@ -55,7 +57,8 @@ class Griffin(nn.Module):
 
     block_class = modules.ResidualBlock
     if self.gradient_checkpointing:
-      block_class = nn.remat(block_class)
+      # `return_cache` is a static argument.
+      block_class = nn.remat(block_class, static_argnums=4)
     self.blocks = [
         block_class(
             name=f"blocks.{i}",
@@ -79,24 +82,76 @@ class Griffin(nn.Module):
         param_dtype=self.param_dtype,
     )
 
+  @overload
   def __call__(
       self,
       tokens: at.Tokens,
       segment_pos: at.SegmentPos,
       cache: Cache | None = None,
+      return_logits: Literal[False] = False,
+      return_cache: Literal[False] = False,
+  ) -> tuple[None, None]:
+    ...
+
+  @overload
+  def __call__(
+      self,
+      tokens: at.Tokens,
+      segment_pos: at.SegmentPos,
+      cache: Cache | None = None,
+      return_logits: Literal[False] = False,
+      return_cache: Literal[True] = True,
+  ) -> tuple[None, Cache]:
+    ...
+
+  @overload
+  def __call__(
+      self,
+      tokens: at.Tokens,
+      segment_pos: at.SegmentPos,
+      cache: Cache | None = None,
+      return_logits: Literal[True] = True,
+      return_cache: Literal[False] = False,
+  ) -> tuple[at.TokenLogits, None]:
+    ...
+
+  @overload
+  def __call__(
+      self,
+      tokens: at.Tokens,
+      segment_pos: at.SegmentPos,
+      cache: Cache | None = None,
+      return_logits: Literal[True] = True,
+      return_cache: Literal[True] = True,
   ) -> tuple[at.TokenLogits, Cache]:
+    ...
+
+  @at.typed
+  def __call__(
+      self,
+      tokens: at.Tokens,
+      segment_pos: at.SegmentPos,
+      cache: Cache | None = None,
+      return_logits: bool = True,
+      return_cache: bool = True,
+  ) -> tuple[at.TokenLogits | None, Cache | None]:
     """Calls Griffin.
 
     Args:
       tokens: Sequence of input tokens.
       segment_pos: Positions of each token in the sequence.
       cache: Cache with pre-computed values for sampling.
+      return_logits: Whether to compute and return the logits.
+      return_cache: Whether to compute and return the updated cache.
 
     Returns:
       Output of the model together with the updated cache. If `cache` is None
       than the returned updated cache is empty initialized and filled in from
       the input sequence.
     """
+    if not return_logits and not return_cache:
+      return None, None
+
     input_emb = self.embedder.encode(jnp.array(tokens))
     x = input_emb
 
@@ -104,17 +159,24 @@ class Griffin(nn.Module):
     for i, block in enumerate(self.blocks):
       layer_name = f"blocks.{i}"
       x, new_cache[layer_name] = block(
-          x=x,
-          segment_pos=segment_pos,
-          cache=None if cache is None else cache[layer_name],
+          x,
+          segment_pos,
+          None if cache is None else cache[layer_name],
+          return_cache,
       )
+
+    if not return_logits:
+      return None, new_cache
 
     x = self.final_norm(x)
     logits = self.embedder.decode(x)
 
     c = self.config.logits_soft_cap
-    if c is not None:
+    if c:
       logits = jnp.tanh(logits / c) * c
+
+    if not return_cache:
+      return logits, None
 
     return logits, new_cache
 

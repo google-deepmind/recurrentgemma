@@ -22,6 +22,7 @@ from flax import struct
 import jax
 import jax.numpy as jnp
 import jaxtyping as jt
+from recurrentgemma import common
 from recurrentgemma.jax import array_typing as at
 
 import sentencepiece as spm
@@ -67,8 +68,8 @@ class SamplerOutput:
   """
 
   text: list[str]
-  logits: list[list[float]]
-  tokens: list[list[int]]
+  tokens: list[jax.Array]
+  logits: list[jax.Array]
 
 
 class Sampler(Generic[Cache]):
@@ -81,6 +82,7 @@ class Sampler(Generic[Cache]):
       params: at.Params,
       jit_compile: bool = True,
       deterministic_sampling: bool = True,
+      is_it_model: bool = False,
   ):
     """Initializes a sampler for a Griffin model.
 
@@ -92,6 +94,7 @@ class Sampler(Generic[Cache]):
       deterministic_sampling: If `True` will sample the `argmax` from the
         logits, else will sample from the categorical distribution defined by
         the logits.
+      is_it_model: if the passed model is instruction tuned
     """
     self.model = model
     self.vocab = vocab
@@ -108,10 +111,15 @@ class Sampler(Generic[Cache]):
         donate_argnums=[1],
         static_argnums=[2],
     )
+    self._is_it_model = is_it_model
 
   @property
   def dtype(self) -> jnp.dtype:
     return jax.tree_util.tree_leaves(self.params)[0].dtype
+
+  @property
+  def vocab_size(self) -> int:
+    return self.model.config.vocab_size
 
   @property
   def prompt_processing_fn(self) -> Callable[..., SamplingState[Cache]]:
@@ -133,13 +141,17 @@ class Sampler(Generic[Cache]):
       params: at.Params,
       tokens: at.Tokens,
       segment_pos: at.SegmentPos,
-      cache: Cache | None = None,
-  ) -> tuple[at.TokenLogits, Cache]:
+      cache: Cache | None,
+      return_logits: bool,
+      return_cache: bool,
+  ) -> tuple[at.TokenLogits | None, Cache | None]:
     return self.model.apply(
         {"params": params},
         tokens=tokens,
         segment_pos=segment_pos,
         cache=cache,
+        return_logits=return_logits,
+        return_cache=return_cache,
     )
 
   @at.typed
@@ -185,6 +197,8 @@ class Sampler(Generic[Cache]):
         tokens=last_token,
         segment_pos=sampler_state.positions,
         cache=sampler_state.cache,
+        return_logits=True,
+        return_cache=True,
     )
 
     # Compute and fill next token
@@ -217,10 +231,10 @@ class Sampler(Generic[Cache]):
   @at.typed
   def tokenize(self, input_string: str) -> jax.Array:
     """Tokenizes the input string."""
+    if self._is_it_model:
+      input_string = common.apply_it_formatter(input_string)
     input_ids = self.vocab.EncodeAsIds(input_string)
-    input_ids = jnp.array(
-        [self.vocab.bos_id()] + jnp.array(input_ids).tolist(), dtype=jnp.int32
-    )
+    input_ids = jnp.array([self.vocab.bos_id()] + input_ids, dtype=jnp.int32)
     return input_ids
 
   @at.typed
@@ -262,40 +276,75 @@ class Sampler(Generic[Cache]):
     # Make all positions to end with the corresponding sequence `length - 1`.
     positions = jnp.repeat(jnp.arange(prompt_length)[None], batch_size, axis=0)
     positions = positions - prompt_length + input_lengths[:, None]
-    positions = jnp.maximum(positions, 0)
+    positions = jnp.maximum(positions, -1)
 
-    if prompt_length == 1:
-      logits, cache = self.apply_model(params, tokens, positions)
+    # Actual prompt processing.
+    if total_generation_steps == 0:
+      # No sampling.
+      prev_logits, cache = self.apply_model(
+          params=params,
+          tokens=tokens,
+          segment_pos=positions,
+          cache=None,
+          return_logits=return_logits and echo,
+          return_cache=False,
+      )
+      logits = None
+
+    elif prompt_length == 1:
+      # Just a single BOS token.
+      logits, cache = self.apply_model(
+          params=params,
+          tokens=tokens,
+          segment_pos=positions,
+          cache=None,
+          return_logits=return_logits,
+          return_cache=True,
+      )
       prev_logits = logits[:, :0]
 
     else:
       # Process everything except the last token separately, since unless
       # `return_logits=True` and `echo=True`, we don't need `prev_logits`.
       prev_logits, cache = self.apply_model(
-          params, tokens[:, :-1], positions[:, :-1]
+          params=params,
+          tokens=tokens[:, :-1],
+          segment_pos=positions[:, :-1],
+          cache=None,
+          return_logits=return_logits and echo,
+          return_cache=True,
       )
       # Process the last token for logits
       logits, cache = self.apply_model(
-          params, tokens[:, -1:], positions[:, -1:], cache
+          params=params,
+          tokens=tokens[:, -1:],
+          segment_pos=positions[:, -1:],
+          cache=cache,
+          return_logits=True,
+          return_cache=total_generation_steps > 1,
       )
 
-    # Create the newly sampled tokens buffer
+    # Tokens buffer for samples.
     tokens_buffer = jnp.full(
         (batch_size, total_generation_steps),
         self.vocab.pad_id(),
         dtype=jnp.int32,
     )
+
     if logits is not None:
+      # Sample the next token and update the tokens buffer.
       next_token, rng = self._sample_from_logits(rng, logits[:, 0])
       tokens_buffer = tokens_buffer.at[:, 0].set(next_token)
 
     if return_logits:
-      # Create the newly sampled logits buffer
+      # Logits buffer for samples.
       logits_buffer = jnp.zeros(
-          (batch_size, total_generation_steps, logits.shape[-1]),
+          (batch_size, total_generation_steps, self.vocab_size),
           dtype=self.dtype,
       )
+
       if logits is not None:
+        # Updated the logits buffer with the ones used for the next token.
         logits_buffer = logits_buffer.at[:, 0].set(logits[:, 0])
 
     else:
@@ -305,13 +354,19 @@ class Sampler(Generic[Cache]):
     total_steps = jnp.array(total_generation_steps, dtype=jnp.int32)
 
     if echo:
-      # Append the tokens and logits to the start of the buffers and update
-      # accordingly the step and total_steps
+      # Append the tokens to start of the token buffer.
       tokens_buffer = jnp.concatenate([tokens, tokens_buffer], axis=1)
+
       if return_logits:
-        logits_buffer = jnp.concatenate(
-            [prev_logits, logits, logits_buffer], axis=1
-        )
+        if logits is None:
+          # No sampling, so all logits are coming from the prompt.
+          logits_buffer = prev_logits
+        else:
+          # Append the logits from the prompt to the start of the logits buffer.
+          all_logits = [prev_logits, logits, logits_buffer]
+          logits_buffer = jnp.concatenate(all_logits, axis=1)
+
+      # Update the step and the total steps accordingly.
       step = step + prompt_length
       total_steps = total_steps + prompt_length
 
@@ -373,15 +428,17 @@ class Sampler(Generic[Cache]):
     if not self.deterministic_sampling and rng is None:
       raise ValueError("rng must be provided if sampling "
                        "non-deterministically.")
-    if total_generation_steps < 1:
-      raise ValueError("total_generation_steps must be at least 1.")
+    if total_generation_steps < 0:
+      raise ValueError("total_generation_steps must be at least 0.")
 
-    # Create a batched array from inputs
+    # Create a batched array from inputs.
     all_input_ids = [self.tokenize(x) for x in input_strings]
     input_lengths = jnp.asarray([len(input_ids) for input_ids in all_input_ids])
     padded_tokens = self._get_padded_tokens(all_input_ids)
+    _, pad_length = padded_tokens.shape
+    pad_lengths = pad_length - input_lengths
 
-    # Prefill processing stage
+    # Prefill processing stage.
     sampling_state = self.prompt_processing_fn(
         self.params,
         padded_tokens,
@@ -392,7 +449,7 @@ class Sampler(Generic[Cache]):
         echo,
     )
 
-    # Sampling stage
+    # Sampling stage.
     if total_generation_steps > 1:
       sampling_state = self.sample_fn(
           self.params,
@@ -400,18 +457,22 @@ class Sampler(Generic[Cache]):
           end_sampling_at_eos_token,
       )
 
-    # Decoding
-    out_tokens = sampling_state.tokens_buffer.tolist()
-    decoded_outputs = [self.vocab.DecodeIds(tokens) for tokens in out_tokens]
+    # Text decoding.
+    tokens = [
+        tokens[l:] for tokens, l in
+        zip(sampling_state.tokens_buffer, pad_lengths)
+    ]
 
-    if sampling_state.logits_buffer is not None:
-      out_logits = sampling_state.logits_buffer.tolist()
+    if return_logits:
+      logits = [
+          logits[l:] for logits, l in
+          zip(sampling_state.logits_buffer, pad_lengths)
+      ]
     else:
-      out_logits = []
+      logits = []
 
-    result = SamplerOutput(
-        text=decoded_outputs,
-        logits=out_logits,
-        tokens=out_tokens,
+    return SamplerOutput(
+        text=[self.vocab.DecodeIds(seq.tolist()) for seq in tokens],
+        tokens=tokens,
+        logits=logits,
     )
-    return result

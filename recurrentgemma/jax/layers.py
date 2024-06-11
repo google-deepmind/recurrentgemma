@@ -16,6 +16,7 @@
 
 from collections.abc import Sequence
 import functools
+from typing import Literal, overload
 
 import einops
 from flax import linen as nn
@@ -368,19 +369,41 @@ class RGLRU(nn.Module):
         param_dtype=self.param_dtype,
     )
 
+  @overload
+  def __call__(
+      self,
+      x: at.ExpandedActivations,
+      segment_pos: at.SegmentPos,
+      cache: at.RNNState | None = None,
+      return_cache: Literal[True] = True,
+  ) -> tuple[at.ExpandedActivations, at.RNNState]:
+    ...
+
+  @overload
+  def __call__(
+      self,
+      x: at.ExpandedActivations,
+      segment_pos: at.SegmentPos,
+      cache: at.RNNState | None = None,
+      return_cache: Literal[False] = False,
+  ) -> tuple[at.ExpandedActivations, None]:
+    ...
+
   @at.typed
   def __call__(
       self,
       x: at.ExpandedActivations,
       segment_pos: at.SegmentPos,
-      prev_h: at.RNNState | None = None,
-  ) -> tuple[at.ExpandedActivations, at.RNNState]:
+      cache: at.RNNState | None = None,
+      return_cache: bool = True,
+  ) -> tuple[at.ExpandedActivations, at.RNNState | None]:
     """Calls the RG-LRU.
 
     Args:
       x: Sequence of input activations.
       segment_pos: Position of each token in the sequence.
-      prev_h: The previous hidden state of the RG-LRU.
+      cache: The previous hidden state of the RG-LRU.
+      return_cache: Whether to compute and return the updated cache.
 
     Returns:
       Output of the block together with the updated hidden state.
@@ -415,10 +438,14 @@ class RGLRU(nn.Module):
         x=normalized_x,
         a=a,
         reset=reset,
-        h0=prev_h,
+        h0=cache,
         scan_type=self.scan_type,
         pallas_sharding_spec=self.pallas_sharding_spec,
     )
+
+    if not return_cache:
+      return y, None
+
     return y, last_h
 
   @classmethod
@@ -470,39 +497,60 @@ class Conv1D(nn.Module):
         self.param_dtype,
     )
 
+  @overload
+  def __call__(
+      self,
+      x: at.ExpandedActivations,
+      segment_pos: at.SegmentPos,
+      cache: at.RNNState | None = None,
+      return_cache: Literal[True] = True,
+  ) -> tuple[at.ExpandedActivations, at.RNNState]:
+    ...
+
+  @overload
+  def __call__(
+      self,
+      x: at.ExpandedActivations,
+      segment_pos: at.SegmentPos,
+      cache: at.RNNState | None = None,
+      return_cache: Literal[False] = False,
+  ) -> tuple[at.ExpandedActivations, None]:
+    ...
+
   @at.typed
   def __call__(
       self,
       x: at.ExpandedActivations,
       segment_pos: at.SegmentPos,
-      state: at.Conv1DState | None = None,
-  ) -> tuple[at.ExpandedActivations, at.Conv1DState]:
+      cache: at.Conv1DState | None = None,
+      return_cache: bool = True,
+  ) -> tuple[at.ExpandedActivations, at.Conv1DState | None]:
     """Calls the Conv1D.
 
     Args:
       x: Sequence of input activations.
       segment_pos: Position of each token in the sequence.
-      state: The state containing the previous `self.temporal_width-1` inputs
+      cache: The state containing the previous `self.temporal_width-1` inputs
         This is set to `None` in training mode.
+      return_cache: Whether to compute and return the updated cache.
 
     Returns:
       The output of the convolution and the updated state.
     """
     x, w, b = nn.dtypes.promote_dtype(x, self.w, self.b, dtype=self.dtype)
 
-    if state is not None:
+    output_len = x.shape[1]
+
+    if cache is not None:
       # 1. Decoding mode:
       # - We have access to the previous `self.temporal_width - 1` inputs.
-      # - Only a single token needs to be output.
-      x = self._concatenate_with_state(x, state)
+      x = self._concatenate_with_state(x, cache)
       prompt_len = self.temporal_width - 1
-      output_len = 1
-      state_dtype = state.dtype
+      state_dtype = cache.dtype
     else:
       # 1. Training mode:
       # - The full sequence length need to be output.
       prompt_len = 0
-      output_len = x.shape[1]
       state_dtype = x.dtype
 
     # 3. Perform the convolution:
@@ -523,7 +571,7 @@ class Conv1D(nn.Module):
       )
       x_window = x[:, start_idx:end_idx]
 
-      if state is None:
+      if cache is None:
         # - Ensure that the mask prevents accessing tokens from a different
         #   document in training mode.
         window_mask = self._compute_document_mask(
@@ -546,22 +594,25 @@ class Conv1D(nn.Module):
     # - Add the bias of the convolution.
     convolution_output += b[None, None]
 
-    # 4. Store the new (potentially padded) state for future decoding.
-    new_state = x[:, 1 - self.temporal_width:].astype(state_dtype)
-    new_state = self._pad_state(new_state)
+    if not return_cache:
+      return convolution_output, None
 
-    return convolution_output, new_state
+    # 4. Store the new (potentially padded) state for future decoding.
+    new_cache = x[:, 1 - self.temporal_width:].astype(state_dtype)
+    new_cache = self._pad_cache(new_cache)
+
+    return convolution_output, new_cache
 
   def _concatenate_with_state(
       self,
       x: at.ExpandedActivations,
-      state: at.Conv1DState,
+      cache: at.Conv1DState,
   ) -> at.ExpandedActivations:
-    """Concatenates the current input `x` with the previous state for decoding.
+    """Concatenates the current input `x` with the previous cache for decoding.
 
     Args:
       x: The current input activations (shape: [batch_size, 1, width]).
-      state: State tensor storing previous inputs
+      cache: State tensor storing previous inputs
         (shape: [batch_size, temporal_width - 1, width]).
 
     Returns:
@@ -569,9 +620,9 @@ class Conv1D(nn.Module):
       (shape: [batch_size, temporal_width, width]).
     """
     b, num_tokens, d = x.shape
-    assert state.shape == (b, self.temporal_width - 1, d)
+    assert cache.shape == (b, self.temporal_width - 1, d)
     assert num_tokens == 1
-    return jnp.concatenate([state.astype(x.dtype), x], axis=1)
+    return jnp.concatenate([cache.astype(x.dtype), x], axis=1)
 
   def _convolution_window_indices(
       self,
@@ -638,7 +689,7 @@ class Conv1D(nn.Module):
     padding = jnp.zeros((batch_size, padding_len, width), dtype=window.dtype)
     return jnp.concatenate([padding, window], axis=1)
 
-  def _pad_state(
+  def _pad_cache(
       self,
       state: at.Conv1DState,
   ) -> at.Conv1DState:
