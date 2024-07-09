@@ -24,7 +24,7 @@ import jax
 import jax.numpy as jnp
 from recurrentgemma import common
 from recurrentgemma.jax import array_typing as at
-from recurrentgemma.jax import pallas
+from recurrentgemma.jax import scan
 
 
 class RMSNorm(nn.Module):
@@ -128,136 +128,6 @@ class BlockDiagonalLinear(nn.Module):
     return einops.rearrange(y, "... h j -> ... (h j)", h=self.num_blocks)
 
 
-@at.typed
-@functools.partial(jax.vmap, in_axes=(0, 0, 0, None))
-def lru_linear_scan(
-    x: at.ExpandedActivations,
-    h0: at.RNNState | None,
-    a: at.ExpandedActivations,
-    acc_dtype: at.dtype = jnp.float32,
-) -> tuple[at.ExpandedActivations, at.RNNState]:
-  """Computes a linear scan over the second axis of the inputs."""
-  def body_fn(h_prev, current_inputs):
-    x_t, a_t = current_inputs
-    h_t = a_t.astype(acc_dtype) * h_prev + x_t.astype(acc_dtype)
-    return h_t, h_t.astype(x.dtype)
-
-  h_last, y = jax.lax.scan(
-      body_fn,
-      init=jnp.zeros(x.shape[1:], acc_dtype) if h0 is None else h0,
-      xs=(x, a),
-      unroll=128,
-  )
-  return y, h_last
-
-
-@at.typed
-def lru_associative_scan(
-    x: at.ExpandedActivations,
-    h0: at.RNNState | None,
-    a: at.ExpandedActivations,
-    acc_dtype: at.dtype = jnp.float32,
-) -> tuple[at.ExpandedActivations, at.RNNState]:
-  """Computes an associative scan over the second axis of the inputs."""
-
-  def lru_associative_bin_op(
-      element_i: tuple[jax.Array, jax.Array],
-      element_j: tuple[jax.Array, jax.Array],
-  ) -> tuple[jax.Array, jax.Array]:
-    a_i, bu_i = element_i
-    a_j, bu_j = element_j
-    return a_j * a_i, a_j * bu_i + bu_j
-
-  orig_dtype = x.dtype
-  x = x.astype(acc_dtype)
-  a = a.astype(acc_dtype)
-
-  # Optionally concatenate the hidden state.
-  if h0 is not None:
-    a = jnp.concatenate([jnp.ones_like(a[:, :1]), a], axis=1)
-    x = jnp.concatenate([h0[:, None], x], axis=1)
-
-  _, y = jax.lax.associative_scan(lru_associative_bin_op, (a, x), axis=-2)
-
-  # Remove the first element if there was a hidden state.
-  if h0 is not None:
-    y = y[:, 1:]
-
-  return y.astype(orig_dtype), y[:, -1]
-
-
-@at.typed
-def rnn_scan(
-    x: at.ExpandedActivations,
-    a: at.ExpandedActivations,
-    reset: at.Reset,
-    h0: at.RNNState | None,
-    scan_type: common.ScanType,
-    acc_dtype: at.dtype = jnp.float32,
-    pallas_sharding_spec: pallas.PallasShardingSpec | None = None,
-) -> tuple[at.ExpandedActivations, at.RNNState]:
-  """Runs the recurrence of a linear RNN.
-
-  Args:
-    x: The input sequence.
-    a: The diagonal of the recurrence matrix `A`.
-    reset: Indicator of document boundaries, e.g. when to reset the hidden state
-      of the RNN.
-    h0: The initial hidden state.
-    scan_type: Which scan implementation to use.
-    acc_dtype: The data type for the accumulation.
-    pallas_sharding_spec: Sharding spec for running Pallas on sharded values.
-
-  Returns:
-    The output of the linear recurrence.
-  """
-  assert x.ndim == 3
-  assert a.shape == x.shape[-a.ndim :]
-  assert a.dtype == x.dtype
-  assert type(a) is type(x)
-  assert h0 is None or h0.dtype == acc_dtype
-
-  if scan_type == common.ScanType.AUTO:
-    if jax.local_devices()[0].platform == "tpu":
-      scan_type = common.ScanType.LINEAR_PALLAS
-    else:
-      scan_type = common.ScanType.LINEAR_NATIVE
-
-  # Multiply `a` by the reset.
-  a = a * (1 - reset)[..., None]
-
-  if x.shape[1] == 1:
-    # Using scan in sampling mode.
-    if h0 is None:
-      return x, x[:, 0].astype(acc_dtype)
-
-    else:
-      y = a.astype(acc_dtype) * h0[:, None] + x.astype(acc_dtype)
-      return y.astype(x.dtype), y[:, -1]
-
-  else:
-    match scan_type:
-
-      case common.ScanType.LINEAR_PALLAS:
-        # Using a Pallas linear scan kernel.
-        if acc_dtype != jnp.float32:
-          raise ValueError(f"Unsupported accumulation dtype: {acc_dtype}.")
-
-        y = pallas.sharded_lru(x, a, h0, pallas_sharding_spec)
-        return y, y[:, -1].astype(acc_dtype)
-
-      case common.ScanType.LINEAR_NATIVE:
-        # Using native Jax linear scan.
-        return lru_linear_scan(x, h0, a, acc_dtype)
-
-      case common.ScanType.ASSOCIATIVE_NATIVE:
-        # Using native Jax associative scan.
-        return lru_associative_scan(x, h0, a, acc_dtype)
-
-      case _:
-        raise ValueError(f"Unsupported scan type: {scan_type}.")
-
-
 def rnn_param_init(
     min_rad: float,
     max_rad: float,
@@ -326,7 +196,7 @@ class RGLRU(nn.Module):
     scan_type: Which scan implementation to use.
     w_init_variance_scale: Initialization parameter for the BlockDiagonalLinear
       layers of the gates. See the `BlockDiagonalLinear` layer for details.
-    pallas_sharding_spec: Sharding spec for running Pallas on sharded values.
+    scan_sharding_spec: Sharding spec for running scan on sharded values.
     dtype: dtype used for computation.
     param_dtype: dtype used for initializing parameters.
   """
@@ -335,7 +205,7 @@ class RGLRU(nn.Module):
   num_heads: int
   scan_type: common.ScanType = common.ScanType.AUTO
   w_init_variance_scale: float = 1.0
-  pallas_sharding_spec: pallas.PallasShardingSpec | None = None
+  scan_sharding_spec: scan.ShardingSpec | None = None
   dtype: at.dtype | None = None
   param_dtype: at.dtype = jnp.float32
 
@@ -434,13 +304,13 @@ class RGLRU(nn.Module):
     multiplier = reset[..., None] + (1 - reset)[..., None] * multiplier
     normalized_x = gated_x * multiplier.astype(x.dtype)
 
-    y, last_h = rnn_scan(
+    y, last_h = scan.linear_scan(
         x=normalized_x,
-        a=a,
-        reset=reset,
+        a=a * (1 - reset[..., None]),
         h0=cache,
         scan_type=self.scan_type,
-        pallas_sharding_spec=self.pallas_sharding_spec,
+        sharding_spec=self.scan_sharding_spec,
+        unroll=128,
     )
 
     if not return_cache:

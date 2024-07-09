@@ -94,11 +94,10 @@ class LayersTest(parameterized.TestCase):
     reset = jnp.zeros((b, seq_len), dtype=jnp.bool_)
 
     # when
-    y, h_next = layers.rnn_scan(
-        x,
-        a,
-        reset,
-        h0,
+    y, h_next = layers.scan.linear_scan(
+        x=x,
+        a=a * (1 - reset[..., None]),
+        h0=h0,
         scan_type=scan_type,
     )
 

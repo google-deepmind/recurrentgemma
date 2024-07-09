@@ -22,7 +22,7 @@ from recurrentgemma import common
 from recurrentgemma.jax import array_typing as at
 from recurrentgemma.jax import layers
 from recurrentgemma.jax import modules
-from recurrentgemma.jax import pallas
+from recurrentgemma.jax import scan
 
 
 Cache = dict[str, modules.ResidualBlockCache]
@@ -33,7 +33,7 @@ class Griffin(nn.Module):
 
   Attributes:
     config: The Griffin config.
-    pallas_sharding_spec: Sharding spec for running Pallas on sharded values.
+    scan_sharding_spec: Sharding spec for running scan on sharded values.
     gradient_checkpointing: Whether to apply gradient checkpointing on every
       residual block.
     dtype: dtype used for computation.
@@ -41,7 +41,7 @@ class Griffin(nn.Module):
   """
 
   config: common.GriffinConfig
-  pallas_sharding_spec: pallas.PallasShardingSpec | None = None
+  scan_sharding_spec: scan.ShardingSpec | None = None
   gradient_checkpointing: bool = True
   dtype: at.dtype | None = None
   param_dtype: at.dtype = jnp.float32
@@ -70,7 +70,7 @@ class Griffin(nn.Module):
             temporal_block_type=block_type,
             scan_type=self.config.scan_type,
             final_w_init_variance_scale=2.0 / self.config.num_layers,
-            pallas_sharding_spec=self.pallas_sharding_spec,
+            scan_sharding_spec=self.scan_sharding_spec,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
         )
