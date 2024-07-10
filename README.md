@@ -4,6 +4,9 @@ RecurrentGemma is a family of open-weights Language Models by [Google DeepMind](
 
 This repository contains the model implementation and examples for sampling and fine-tuning. We recommend most users adopt the [Flax](https://github.com/google/flax) implementation, which is highly optimized. We also provide an un-optimized [PyTorch](https://github.com/pytorch/pytorch) implementation for reference.
 
+<a href="docs/README_JA.md"><img src="https://img.shields.io/badge/ドキュメント-日本語-white.svg" alt="JA doc"/></a>
+<a href="README.md"><img src="https://img.shields.io/badge/english-document-white.svg" alt="EN doc"></a>
+
 ### Learn more about RecurrentGemma
 
 -   The [RecurrentGemma technical report](https://storage.googleapis.com/deepmind-media/gemma/recurrentgemma-report.pdf) gives specific details on the training and evaluation of RecurrentGemma.
