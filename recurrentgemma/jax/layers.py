@@ -22,8 +22,10 @@ import einops
 from flax import linen as nn
 import jax
 import jax.numpy as jnp
+import jaxtyping as jt
 from recurrentgemma import common
 from recurrentgemma.jax import array_typing as at
+from recurrentgemma.jax import complex_lib
 from recurrentgemma.jax import scan
 
 
@@ -52,9 +54,7 @@ class RMSNorm(nn.Module):
     )
 
   @at.typed
-  def __call__(
-      self, x: at.ExpandedActivations
-  ) -> at.ExpandedActivations:
+  def __call__(self, x: at.ExpandedActivations) -> at.ExpandedActivations:
     """Calls the RMSNorm."""
     x, scale = nn.dtypes.promote_dtype(x, self.scale, dtype=self.dtype)
 
@@ -70,7 +70,8 @@ class BlockDiagonalLinear(nn.Module):
   """Block-diagonal linear layer.
 
   Attributes:
-    width: The number of dimensions of the input and output.
+    width_input: The number of dimensions of the input.
+    width_output: The number of dimensions of the output.
     num_blocks: The number of diagonal blocks in the layer.
     w_init_variance_scale: A parameters that scales the variance of the
       initialization of the weights.
@@ -78,8 +79,9 @@ class BlockDiagonalLinear(nn.Module):
     param_dtype: dtype used for initializing parameters.
   """
 
-  width: int
+  width_input: int
   num_blocks: int
+  width_output: int | None = None
   w_init_variance_scale: float = 1.0
   dtype: at.dtype | None = None
   param_dtype: at.dtype = jnp.float32
@@ -94,27 +96,36 @@ class BlockDiagonalLinear(nn.Module):
     )
 
   def setup(self):
-    assert self.width % self.num_blocks == 0
-    block_width = self.width // self.num_blocks
+    assert self.width_input % self.num_blocks == 0
+
+    if self.width_output is None:
+      width_output = self.width_input
+    else:
+      width_output = self.width_output
+
+    assert width_output % self.num_blocks == 0
+
+    input_size = self.width_input // self.num_blocks
+    output_size = width_output // self.num_blocks
 
     # Parameters.
     self.w = self.param(
         "w",
         self.kernel_init,
-        [self.num_blocks, block_width, block_width],
+        [self.num_blocks, input_size, output_size],
         self.param_dtype,
     )
     self.b = self.param(
         "b",
         nn.initializers.zeros_init(),
-        [self.num_blocks, block_width],
+        [self.num_blocks, output_size],
         self.param_dtype,
     )
 
   @at.typed
   def __call__(
-      self, x: at.ExpandedActivations
-  ) -> at.ExpandedActivations:
+      self, x: jt.Float[jt.Array, "*b t e"]
+  ) -> jt.Float[jt.Array, "*b t f"]:
     """Calls the BlockDiagonalLinear."""
     x, w, b = nn.dtypes.promote_dtype(x, self.w, self.b, dtype=self.dtype)
 
@@ -128,13 +139,13 @@ class BlockDiagonalLinear(nn.Module):
     return einops.rearrange(y, "... h j -> ... (h j)", h=self.num_blocks)
 
 
-def rnn_param_init(
+def rnn_real_param_init(
     min_rad: float,
     max_rad: float,
     transform: str = "softplus",
     eps: float = 1e-8,
 ) -> nn.initializers.Initializer:
-  """Initializes the `A` parameter of the RG-LRU uniformly on a ring."""
+  """Initializes the `A` real parameter of the RG-LRU uniformly on a ring."""
 
   def init(
       key: jax.Array,
@@ -154,10 +165,26 @@ def rnn_param_init(
   return init
 
 
+def rnn_imag_param_init(
+    max_rad: float,
+) -> nn.initializers.Initializer:
+  """Initializes the `A` imag parameter of the RG-LRU uniformly on a ring."""
+
+  def init(
+      key: jax.Array,
+      shape: Sequence[int],
+      dtype: at.dtype = jnp.float32,
+  ) -> at.RNNDiagonal:
+    unif = jax.random.uniform(key, shape=shape)
+    return (jnp.pi * max_rad * unif).astype(dtype)
+
+  return init
+
+
 @functools.partial(jax.custom_vjp, nondiff_argnums=(1,))
 @at.typed
 def sqrt_bound_derivative(
-    x: jax.Array,
+    x: complex_lib.RealOrComplex,
     max_gradient: float | jax.Array,
 ) -> jax.Array:
   """Computes a square root with a gradient clipped at `max_gradient`."""
@@ -168,7 +195,7 @@ def sqrt_bound_derivative(
 @at.typed
 def stable_sqrt_fwd(
     x: jax.Array,
-    _: float | jax.Array
+    _: float | jax.Array,
 ) -> tuple[jax.Array, tuple[jax.Array]]:  # pylint: disable=g-one-element-tuple
   return jnp.sqrt(x), (x,)
 
@@ -199,6 +226,9 @@ class RGLRU(nn.Module):
     scan_sharding_spec: Sharding spec for running scan on sharded values.
     dtype: dtype used for computation.
     param_dtype: dtype used for initializing parameters.
+    only_real: Whether to use only real numbers.
+    min_rad: The minimum radius of the ring on which the real part of `A` is
+      initialized.
   """
 
   width: int
@@ -208,22 +238,125 @@ class RGLRU(nn.Module):
   scan_sharding_spec: scan.ShardingSpec | None = None
   dtype: at.dtype | None = None
   param_dtype: at.dtype = jnp.float32
+  only_real: bool = True
+  min_rad: float = 0.9
+
+  @at.typed
+  def merged_to_complex(
+      self,
+      x: jt.Float[jt.ArrayLike, "*b"],
+  ) -> complex_lib.RealOrComplex:
+    """Returns a (complex) array from a merged array.
+
+    A merged array is one where the first half over the last axis represents the
+    real part of a complex array, while the second part represents the
+    imaginary.
+
+    Args:
+      x: The merged array.
+
+    Returns:
+      A (complex) array represented by `x`.
+    """
+    if self.only_real:
+      return x
+
+    assert x.shape[-1] % 2 == 0
+    return self.real_imag_complex(*jnp.split(x, 2, axis=-1))
+
+  @at.typed
+  def real_imag_complex(
+      self,
+      real: jt.Float[jt.Array, "*b"],
+      imag: jt.Float[jt.Array, "*b"],
+  ) -> complex_lib.RealOrComplex:
+    """Based on the settings, creates a (complex) number in the correct format.
+
+    Args:
+      real: The real part of the complex number.
+      imag: The imaginary part of the complex number.
+
+    Returns:
+      The correct representation for a complex number. If `only_real=True`
+      the function expects that `imag` is None and will directly return `real`.
+      When using `bfloat16` or Pallas a `complex_lib.Complex` is returned,
+      otherwise a native jax array with a complex type.
+    """
+    if self.only_real:
+      assert imag is None
+      return real
+
+    if self.use_custom_complex(real.dtype):
+      return complex_lib.Complex(real, imag)
+    else:
+      return real + 1j * imag
+
+  def use_custom_complex(self, real_dtype: jnp.dtype) -> bool:
+    return (
+        real_dtype in (jnp.bfloat16, jnp.float16)
+        or self.scan_type == common.ScanType.LINEAR_PALLAS
+    )
+
+  @at.typed
+  def complex_to_merged(
+      self,
+      x: complex_lib.RealOrComplex,
+  ) -> jt.Float[jt.ArrayLike, "*b"]:
+    """Returns a merged array from a (complex) array.
+
+    A merged array is one where the first half over the last axis represents the
+    real part of a complex array, while the second part represents the
+    imaginary.
+
+    Args:
+      x: The (complex) array.
+
+    Returns:
+      A merged array represented by `x`.
+    """
+    if self.only_real:
+      assert not isinstance(x, complex_lib.Complex) and not jnp.iscomplexobj(x)
+      return x
+
+    else:
+      return einops.rearrange([x.real, x.imag], "c ... d -> ... (c d)", c=2)
 
   @property
-  def a_param_init(self) -> nn.initializers.Initializer:
-    """Initializer for the `A` parameter of the RG-LRU."""
-    return rnn_param_init(min_rad=0.9, max_rad=0.999)
+  def a_real_param_init(self) -> nn.initializers.Initializer:
+    """Initializer for the real `A` parameter of the RG-LRU."""
+    return rnn_real_param_init(min_rad=self.min_rad, max_rad=0.999)
+
+  @property
+  def a_imag_param_init(self) -> nn.initializers.Initializer:
+    """Initializer for the imag `A` parameter of the RG-LRU."""
+    return rnn_imag_param_init(max_rad=0.1)
 
   def setup(self):
     # Parameters and layers.
-    self.a_param = self.param(
+    assert self.width % 2 == 0
+
+    if not self.only_real:
+      assert self.min_rad < 0.999
+
+    width_output = self.width if self.only_real else self.width // 2
+    self.a_real_param = self.param(
         "a_param",
-        self.a_param_init,
-        [self.width],
+        self.a_real_param_init,
+        [width_output],
         self.param_dtype,
     )
+
+    if not self.only_real:
+      self.a_imag_param = self.param(
+          "a_imag_param",
+          self.a_imag_param_init,
+          [width_output],
+          self.param_dtype,
+      )
+
     self.input_gate = BlockDiagonalLinear(
-        width=self.width,
+        width_input=self.width,
+        width_output=width_output,
         num_blocks=self.num_heads,
         w_init_variance_scale=self.w_init_variance_scale,
         name="input_gate",
@@ -231,7 +364,8 @@ class RGLRU(nn.Module):
         param_dtype=self.param_dtype,
     )
     self.a_gate = BlockDiagonalLinear(
-        width=self.width,
+        width_input=self.width,
+        width_output=width_output,
         num_blocks=self.num_heads,
         w_init_variance_scale=self.w_init_variance_scale,
         name="a_gate",
@@ -278,26 +412,41 @@ class RGLRU(nn.Module):
     Returns:
       Output of the block together with the updated hidden state.
     """
-    x, a_param = nn.dtypes.promote_dtype(x, self.a_param, dtype=self.dtype)
+    x, a_real_param = nn.dtypes.promote_dtype(
+        x,
+        self.a_real_param,
+        dtype=self.dtype,
+    )
 
     bs, l, _ = x.shape
     assert segment_pos.shape == (bs, l)
-    reset = segment_pos == 0
 
     # Gate for the input.
-    gate_x = jax.nn.sigmoid(self.input_gate(x))
+    gate_x = complex_lib.sigmoid(self.input_gate(x))
 
     # Gate for `A`.
-    gate_a = jax.nn.sigmoid(self.a_gate(x))
+    gate_a = complex_lib.sigmoid(self.a_gate(x))
 
     # Compute the parameter `A` of the recurrence.
-    log_a = -8.0 * gate_a * jax.nn.softplus(a_param)
-    a = jnp.exp(log_a)
-    a_squared = jnp.exp(2 * log_a)
+    log_a = -8.0 * gate_a * complex_lib.softplus(a_real_param)
+    if self.only_real:
+      a, a_squared = complex_lib.exp(log_a), complex_lib.exp(2 * log_a)
+    else:
+      (a_imag_param,) = nn.dtypes.promote_dtype(
+          self.a_imag_param,
+          dtype=self.dtype,
+      )
+      log_a_imag = a_imag_param * gate_a
+      log_a_complex = self.real_imag_complex(log_a, log_a_imag)
+      a, a_squared = complex_lib.exp(log_a_complex), complex_lib.exp(2 * log_a)
+
+    x = self.merged_to_complex(x)
+    h0 = self.merged_to_complex(cache) if cache is not None else None
 
     # Gate the input.
     gated_x = x * gate_x
 
+    reset = (segment_pos == 0).astype(a)
     # Apply gamma normalization to the input. We need to clip the derivatives of
     # `sqrt` in order to prevent NaNs during training in bfloat16.
     multiplier = sqrt_bound_derivative(1 - a_squared, 1000)
@@ -307,14 +456,18 @@ class RGLRU(nn.Module):
     y, last_h = scan.linear_scan(
         x=normalized_x,
         a=a * (1 - reset[..., None]),
-        h0=cache,
+        h0=h0,
         scan_type=self.scan_type,
         sharding_spec=self.scan_sharding_spec,
         unroll=128,
     )
 
+    y = self.complex_to_merged(y)
+
     if not return_cache:
       return y, None
+
+    last_h = self.complex_to_merged(last_h)
 
     return y, last_h
 
@@ -429,7 +582,7 @@ class Conv1D(nn.Module):
 
     # - We cannot look back by more than the total sequence length
     #   ("valid" convolution).
-    temporal_width = min(self.temporal_width, prompt_len+output_len)
+    temporal_width = min(self.temporal_width, prompt_len + output_len)
 
     # - The convolution is implemented as a manual loop so that we can
     #   incorporate the window masking further below.
@@ -456,7 +609,7 @@ class Conv1D(nn.Module):
 
       # - Select w for this temporal shift, and expand on the batch and time
       #   dimensions.
-      w_shift = w[self.temporal_width-temporal_shift-1][None, None, :]
+      w_shift = w[self.temporal_width - temporal_shift - 1][None, None, :]
 
       # - Accumulate the convolution result.
       convolution_output += x_window * w_shift
@@ -468,7 +621,7 @@ class Conv1D(nn.Module):
       return convolution_output, None
 
     # 4. Store the new (potentially padded) state for future decoding.
-    new_cache = x[:, 1 - self.temporal_width:].astype(state_dtype)
+    new_cache = x[:, 1 - self.temporal_width :].astype(state_dtype)
     new_cache = self._pad_cache(new_cache)
 
     return convolution_output, new_cache
@@ -482,8 +635,8 @@ class Conv1D(nn.Module):
 
     Args:
       x: The current input activations (shape: [batch_size, 1, width]).
-      cache: State tensor storing previous inputs
-        (shape: [batch_size, temporal_width - 1, width]).
+      cache: State tensor storing previous inputs (shape: [batch_size,
+        temporal_width - 1, width]).
 
     Returns:
       The concatenated input sequence
@@ -528,8 +681,8 @@ class Conv1D(nn.Module):
     """Creates a mask to prevent mixing of information between documents.
 
     Args:
-        segment_pos: Position of each token in the sequence. In particular,
-          a zero indicates the start of a new document.
+        segment_pos: Position of each token in the sequence. In particular, a
+          zero indicates the start of a new document.
         start_idx: The starting index of the convolution window.
         end_idx: The ending index of the convolution window.
         max_look_ahead: How much to look ahead at most to detect a document
@@ -545,7 +698,7 @@ class Conv1D(nn.Module):
     for shift in range(1, max_look_ahead + 1):
       # At each position, look ahead by `shift` tokens to see if a
       # document boundary is present there.
-      mask *= not_a_document_boundary[:, start_idx+shift:end_idx+shift]
+      mask *= not_a_document_boundary[:, start_idx + shift : end_idx + shift]
     return mask
 
   def _pad_window(

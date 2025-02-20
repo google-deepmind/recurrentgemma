@@ -66,7 +66,7 @@ _FORWARD_OPS_UNDER_TEST: Final[list[TestForwardCase]] = [
         op_name='reshape',
         args=[_TEST_ARRAY],
         kwargs=dict(
-            newshape=(
+            shape=(
                 _TEST_ARRAY.shape[0] // 2,
                 -1,
             ),  # ATTENTION: the array 1st dim should be divisible by 2

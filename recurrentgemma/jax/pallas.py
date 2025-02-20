@@ -546,7 +546,7 @@ def linear_rnn_pallas_kernel(
   # Compute outside of the for loop the first step, since it contains special
   # logic for the backprop case.
   if backprop:
-    idx, a_0 = last_idx, 1.0
+    idx, a_0 = last_idx, jnp.ones([], dtype=h_carry_ref.dtype)
   else:
     idx, a_0 = first_idx, a_ref[:, first_idx].astype(h_carry_ref.dtype)
 
@@ -951,7 +951,7 @@ def lru_pallas_scan(
   native_complex = False
   if not isinstance(x, complex_lib.Complex) and jnp.iscomplexobj(x):
     native_complex = True
-    x, a, h0 = jax.tree.map(complex_lib.to_custom_complex, x, a, h0)
+    x, a, h0 = jax.tree.map(complex_lib.to_custom_complex, (x, a, h0))
 
   kernel_spec = compute_pallas_kernel_spec(
       x=x,

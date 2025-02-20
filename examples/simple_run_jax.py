@@ -19,7 +19,6 @@ from collections.abc import Sequence
 from absl import app
 from absl import flags
 from absl import logging
-from flax.training import orbax_utils
 import jax
 import jax.numpy as jnp
 import orbax.checkpoint
@@ -111,8 +110,7 @@ def main(argv: Sequence[str]) -> None:
         "prefill_logits": prefill_logits,
     }
     orbax_checkpointer = orbax.checkpoint.PyTreeCheckpointer()
-    save_args = orbax_utils.save_args_from_target(ckpt)
-    orbax_checkpointer.save(_SAVE_TENSORS.value, ckpt, save_args=save_args)
+    orbax_checkpointer.save(_SAVE_TENSORS.value, ckpt)
 
 
 if __name__ == "__main__":

@@ -210,13 +210,9 @@ def _update_attention_cache(
         values=cache.values.at[idx0, idx1].set(values[:, 0]),
         num_tokens=cache.num_tokens + 1,
     )
-
-  elif n_fill == window_size:
+  else:
     # Processing a prompt in chunks.
     return _attention_cache_from_prompt(keys, values, segment_pos, window_size)
-
-  else:
-    raise NotImplementedError()
 
 
 @at.typed
@@ -460,6 +456,8 @@ class RecurrentBlock(nn.Module):
     scan_sharding_spec: Sharding spec for running scan on sharded values.
     dtype: dtype used for computation.
     param_dtype: dtype used for initializing parameters.
+    lru_only_real: Weather to use only real numbers in the RG-LRU.
+    min_rad: The minimum radius for the RG-LRU.
   """
 
   width: int
@@ -471,6 +469,8 @@ class RecurrentBlock(nn.Module):
   scan_sharding_spec: scan.ShardingSpec | None = None
   dtype: at.dtype | None = None
   param_dtype: at.dtype = jnp.float32
+  lru_only_real: bool = True
+  min_rad: float = 0.9
 
   @property
   def kernel_init(self) -> nn.initializers.Initializer:
@@ -530,6 +530,8 @@ class RecurrentBlock(nn.Module):
         scan_sharding_spec=self.scan_sharding_spec,
         dtype=self.dtype,
         param_dtype=self.param_dtype,
+        only_real=self.lru_only_real,
+        min_rad=self.min_rad,
     )
 
   @overload
@@ -709,6 +711,9 @@ class ResidualBlock(nn.Module):
     scan_sharding_spec: Sharding spec for running scan on sharded values.
     dtype: dtype used for computation.
     param_dtype: dtype used for initializing parameters.
+    lru_only_real: Whether to use only real numbers in the RG-LRU.
+    min_rad: The minimum radius for the RG-LRU.
+    use_mlp: Whether to use the MLP block and associated normalization.
   """
 
   width: int
@@ -723,6 +728,9 @@ class ResidualBlock(nn.Module):
   scan_sharding_spec: scan.ShardingSpec | None = None
   dtype: at.dtype | None = None
   param_dtype: at.dtype = jnp.float32
+  lru_only_real: bool = True
+  min_rad: float = 0.9
+  use_mlp: bool = True
 
   def setup(self) -> None:
     # Sub-blocks and layers.
@@ -745,6 +753,8 @@ class ResidualBlock(nn.Module):
             scan_sharding_spec=self.scan_sharding_spec,
             dtype=self.dtype,
             param_dtype=self.param_dtype,
+            lru_only_real=self.lru_only_real,
+            min_rad=self.min_rad,
         )
 
       case common.TemporalBlockType.ATTENTION:
@@ -757,21 +767,21 @@ class ResidualBlock(nn.Module):
             dtype=self.dtype,
             param_dtype=self.param_dtype,
         )
+    if self.use_mlp:
+      self.channel_pre_norm = layers.RMSNorm(
+          width=self.width,
+          dtype=self.dtype,
+          param_dtype=self.param_dtype,
+      )
 
-    self.channel_pre_norm = layers.RMSNorm(
-        width=self.width,
-        dtype=self.dtype,
-        param_dtype=self.param_dtype,
-    )
-
-    self.mlp = MLPBlock(
-        width=self.width,
-        expanded_width=self.mlp_expanded_width,
-        final_w_init_variance_scale=self.final_w_init_variance_scale,
-        name="mlp_block",
-        dtype=self.dtype,
-        param_dtype=self.param_dtype,
-    )
+      self.mlp = MLPBlock(
+          width=self.width,
+          expanded_width=self.mlp_expanded_width,
+          final_w_init_variance_scale=self.final_w_init_variance_scale,
+          name="mlp_block",
+          dtype=self.dtype,
+          param_dtype=self.param_dtype,
+      )
 
   @property
   def temporal_block(self) -> nn.Module:
@@ -834,12 +844,13 @@ class ResidualBlock(nn.Module):
         inputs_normalized, segment_pos, cache, return_cache=return_cache
     )
 
-    residual = x + raw_x
-
-    x = self.channel_pre_norm(residual)
-    x = self.mlp(x)
-
-    x = x + residual
+    if self.use_mlp:
+      residual = x + raw_x
+      x = self.channel_pre_norm(residual)
+      x = self.mlp(x)
+      x = x + residual
+    else:
+      x = x + raw_x
 
     return x, cache
 

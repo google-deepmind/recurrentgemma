@@ -76,7 +76,7 @@ class BlockDiagonalLinearTest(parameterized.TestCase):
   ):
     test_utils.numerically_compare_modules(
         jax_module=jax_layers.BlockDiagonalLinear(
-            width=width,
+            width_input=width,
             num_blocks=num_blocks,
             param_dtype=dtype,
         ),
