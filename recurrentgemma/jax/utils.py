@@ -55,8 +55,8 @@ def load_parameters(
       sharding = jax.sharding.SingleDeviceSharding(jax.local_devices()[0])
     elif sharding == "replicated":
       devices = mesh_utils.create_device_mesh((jax.local_device_count(),))
-      sharding = jax.sharding.PositionalSharding(devices).replicate(
-          axis=0, keepdims=True
+      sharding = jax.sharding.NamedSharding(
+          jax.sharding.Mesh(devices, "x"), jax.sharding.PartitionSpec()
       )
 
     # Make a sharding tree for all parameters
