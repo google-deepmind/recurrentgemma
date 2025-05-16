@@ -15,3 +15,8 @@
 """RecurrentGemma public library."""
 
 __version__ = "0.1.0"
+
+from recurrentgemma import common
+from recurrentgemma.jax import complex_lib
+from recurrentgemma.jax import layers
+from recurrentgemma.jax import scan
