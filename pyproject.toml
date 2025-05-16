@@ -16,18 +16,18 @@ license = "Apache-2.0"
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3.10"
-absl-py = "~1.4.0"
-sentencepiece = "^0.2.0"
-numpy = "^2.2.1"
-einops = "^0.7.0"
-jaxtyping = "^0.2.28"
-typeguard = "^2.13.3"
-orbax-checkpoint = { version = "0.5.7", optional = true}
-jax = { version = "~0.5.0", optional = true }
-flax = { version = "^0.10.3", optional = true }
-torch = { version = "^2.2.0", optional = true }
-pytest = { version = "^8.0.0", optional = true }
+python = "^3"
+absl-py = "^1"
+sentencepiece = "^0"
+numpy = "^2"
+einops = "^0"
+jaxtyping = "^0"
+typeguard = "^2"
+orbax-checkpoint = { version = "^0", optional = true}
+jax = { version = "^0", optional = true }
+flax = { version = "^0", optional = true }
+torch = { version = "^2", optional = true }
+pytest = { version = "^8", optional = true }
 
 [tool.poetry.extras]
 full = ["jax", "orbax-checkpoint", "flax", "torch"]
