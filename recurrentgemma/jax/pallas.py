@@ -42,7 +42,10 @@ def get_acc_dtype(
 ) -> jnp.dtype:
   """Returns the accumulation dtype for the given inputs."""
   if h0 is not None:
-    assert acc_float_dtype == h0.dtype
+    if isinstance(h0, complex_lib.Complex) or jnp.iscomplexobj(h0):
+      assert acc_float_dtype == h0.real.dtype
+    else:
+      assert acc_float_dtype == h0.dtype
     return acc_float_dtype
   elif isinstance(x, complex_lib.Complex) or not jnp.iscomplexobj(x):
     return acc_float_dtype
