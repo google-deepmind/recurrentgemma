@@ -28,6 +28,8 @@ jax = { version = "^0", optional = true }
 flax = { version = "^0", optional = true }
 torch = { version = "^2", optional = true }
 pytest = { version = "^8", optional = true }
+pytest-xdist = { optional = true }
+pytest-shard = { optional = true }
 
 [tool.poetry.extras]
 full = ["jax", "orbax-checkpoint", "flax", "torch"]
