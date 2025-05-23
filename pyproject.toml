@@ -33,7 +33,7 @@ pytest = { version = "^8", optional = true }
 full = ["jax", "orbax-checkpoint", "flax", "torch"]
 jax = ["jax", "orbax-checkpoint", "flax"]
 torch = ["torch"]
-test = ["pytest", "jax", "orbax-checkpoint", "flax", "torch"]
+test = ["pytest", "jax", "orbax-checkpoint", "flax", "torch", "pytest-xdist", "pytest-shard"]
 
 [build-system]
 requires = ["poetry-core"]
