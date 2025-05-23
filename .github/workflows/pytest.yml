@@ -1,0 +1,78 @@
+name: Unittests
+
+# Allow to trigger the workflow manually (e.g. when deps changes)
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    types: [opened, synchronize, reopened]
+  push:
+  schedule:
+    # Trigger tests every day at 02:00 UTC.
+    - cron: '0 2 * * *'
+
+# Concurrency config borrowed from tensorflow_datasets.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.ref != 'refs/heads/master' || github.run_number }}
+  # Cancel only PR intermediate builds
+  cancel-in-progress: ${{ startsWith(github.ref, 'refs/pull/') }}
+
+# Set the correct env variables for all the unit tests
+env:
+  PYTEST_NUM_SHARDS: 8  # Controls tests sharding enabled by `pytest-shard`
+
+jobs:
+  shards-job:
+    name: Generate shards
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Create variables
+        id: create-vars
+        run: |
+          echo "num-shards=$(jq -n -c '[${{ env.PYTEST_NUM_SHARDS }}]')" >> $GITHUB_OUTPUT
+          echo "shard-ids=$(jq -n -c '[range(1;${{ env.PYTEST_NUM_SHARDS }}+1)]')" >> $GITHUB_OUTPUT
+
+    outputs:
+      num-shards: ${{ steps.create-vars.outputs.num-shards }}
+      shard-ids: ${{ steps.create-vars.outputs.shard-ids }}
+
+  pytest-job:
+    needs: shards-job
+
+    name: '[${{ matrix.os-version }}][Python ${{ matrix.python-version }}][${{ matrix.shard-id }}/${{ matrix.num-shards }}] Core RecurrentGemma tests'
+    runs-on: ${{ matrix.os-version }}
+    timeout-minutes: 30
+    strategy:
+      # Do not cancel in-progress jobs if any matrix job fails.
+      fail-fast: false
+      matrix:
+        # Can't reference env variables in matrix
+        num-shards: ${{ fromJson(needs.shards-job.outputs.num-shards) }}
+        shard-id: ${{ fromJson(needs.shards-job.outputs.shard-ids) }}
+        # BEGIN GOOGLE-INTERNAL
+        # LINT.IfChange(pytest_python_versions)
+        # END GOOGLE-INTERNAL
+        python-version: ['3.10']
+        os-version: [ubuntu-latest]
+
+    steps:
+    - uses: actions/checkout@v4
+
+    # Install deps
+    - uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - run: pip --version
+
+    - run: pip install -e .[full]
+    - run: pip freeze
+
+    # Run tests (in parallel)
+    - name: Run core tests
+      run: |
+        pytest \
+          -vv -n auto \
+          --shard-id=$((${{ matrix.shard-id }} - 1)) --num-shards=${{ env.PYTEST_NUM_SHARDS }}
