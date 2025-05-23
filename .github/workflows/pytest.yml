@@ -67,7 +67,7 @@ jobs:
 
     - run: pip --version
 
-    - run: pip install -e .[full]
+    - run: pip install -e .[test]
     - run: pip freeze
 
     # Run tests (in parallel)
