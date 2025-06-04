@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "recurrentgemma"
-version = "0.1.0"
+version = "1.0.0"
 description = "Open weights large language model (LLM) from Google DeepMind."
 authors = [
   "Alex Botev <botev@google.com>",
