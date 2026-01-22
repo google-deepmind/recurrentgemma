@@ -16,7 +16,7 @@ license = "Apache-2.0"
 readme = "README.md"
 
 [tool.poetry.dependencies]
-python = "^3"
+python = "^3.11"
 absl-py = "^1"
 sentencepiece = ">=0.2.0"
 numpy = ">=1.26.0,<2.4.0"
