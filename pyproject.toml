@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "recurrentgemma"
-version = "1.0.0"
+version = "1.0.1"
 description = "Open weights large language model (LLM) from Google DeepMind."
 authors = [
   "Alex Botev <botev@google.com>",
@@ -18,14 +18,14 @@ readme = "README.md"
 [tool.poetry.dependencies]
 python = "^3"
 absl-py = "^1"
-sentencepiece = "^0"
-numpy = "^2"
+sentencepiece = ">=0.2.0"
+numpy = ">=1.26.0,<2.4.0"
 einops = "^0"
 jaxtyping = "^0"
 typeguard = "^2"
-orbax-checkpoint = { version = "^0", optional = true}
-jax = { version = "^0", optional = true }
-flax = { version = "^0", optional = true }
+orbax-checkpoint = { version = ">=0.1.7", optional = true}
+jax = { version = ">=0.9.0", optional = true }
+flax = { version = ">=0.12.0", optional = true }
 torch = { version = "^2", optional = true }
 pytest = { version = "^8", optional = true }
 
