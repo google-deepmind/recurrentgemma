@@ -164,7 +164,7 @@ def lru_associative_scan(
   ) -> tuple[complex_lib.RealOrComplex, complex_lib.RealOrComplex]:
     a_i, bu_i = element_i
     a_j, bu_j = element_j
-    return a_j * a_i, a_j * bu_i + bu_j
+    return a_j * a_i, a_j * bu_i + bu_j  # pytype: disable=bad-return-type  # jax-operator-types
 
   orig_dtype = x.dtype
   x = x.astype(acc_dtype)

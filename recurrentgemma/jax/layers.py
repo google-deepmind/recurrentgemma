@@ -446,7 +446,7 @@ class RGLRU(nn.Module):
     # Gate the input.
     gated_x = x * gate_x
 
-    reset = (segment_pos == 0).astype(a)
+    reset = (segment_pos == 0).astype(a.dtype)
     # Apply gamma normalization to the input. We need to clip the derivatives of
     # `sqrt` in order to prevent NaNs during training in bfloat16.
     multiplier = sqrt_bound_derivative(1 - a_squared, 1000)

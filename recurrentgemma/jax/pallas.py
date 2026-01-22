@@ -18,7 +18,6 @@ import math
 from typing import Literal, NamedTuple, TypeVar, overload
 
 import jax
-from jax._src.lax.control_flow import for_loop
 import jax.experimental.pallas as pl
 import jax.numpy as jnp
 from recurrentgemma.jax import complex_lib
@@ -477,13 +476,12 @@ def initialize_carry(
 
 def linear_rnn_loop_body(
     i: int,
-    h_and_a_prod_carry_refs: tuple[
-        complex_lib.RealOrComplex,
-        complex_lib.RealOrComplex | None
-    ],
+    _: None,
     x_ref: complex_lib.RealOrComplex,
     a_ref: complex_lib.RealOrComplex,
     y_ref: complex_lib.RealOrComplex,
+    h_carry_ref: complex_lib.RealOrComplex,
+    a_prod_carry_ref: complex_lib.RealOrComplex | None,
     a_prod_ref: complex_lib.RealOrComplex | None = None,
     reverse: bool = False,
     backprop: bool = False,
@@ -498,8 +496,6 @@ def linear_rnn_loop_body(
   else:
     a_idx = (seq_len - 2 - i) if reverse else (i + 1)
     x_idx = a_idx
-
-  h_carry_ref, a_prod_carry_ref = h_and_a_prod_carry_refs
 
   # RNN
   h_t = h_carry_ref[:]
@@ -554,30 +550,38 @@ def linear_rnn_pallas_kernel(
     idx, a_0 = first_idx, a_ref[:, first_idx].astype(h_carry_ref.dtype)
 
   h_carry = a_0 * h_carry_ref[:] + x_ref[:, idx].astype(h_carry_ref.dtype)
+  h_carry_ref[:] = h_carry
   y_ref[:, idx] = h_carry.astype(y_ref.dtype)
 
-  a_prod_carry = None
   if a_prod_carry_ref is not None:
     a_prod_carry = a_prod_carry_ref[:] * a_0
+    a_prod_carry_ref[:] = a_prod_carry
     if not backprop:
       assert a_prod_ref is not None
       a_prod_ref[:, idx] = a_prod_carry.astype(a_prod_ref.dtype)
 
   # Execute loop
-  (h_n, a_prod_n) = for_loop.for_loop(  # pytype: disable=wrong-arg-types
+  jax.lax.fori_loop(
+      0,
       seq_len - 1,
       functools.partial(
           linear_rnn_loop_body,
           x_ref=x_ref,
           a_ref=a_ref,
           y_ref=y_ref,
+          h_carry_ref=h_carry_ref,
+          a_prod_carry_ref=a_prod_carry_ref,
           a_prod_ref=a_prod_ref,
           reverse=reverse,
           backprop=backprop,
       ),
-      (h_carry, a_prod_carry),
+      init_val=None,
   )
 
+  h_n = h_carry_ref[:]
+  a_prod_n = None
+  if a_prod_carry_ref is not None:
+    a_prod_n = a_prod_carry_ref[:]
   if backprop:
     a_n = a_ref[:, first_idx].astype(h_carry.dtype)
     h_n = h_n * a_n
@@ -912,7 +916,7 @@ def pallas_lru(
     assert isinstance(h_last, complex_lib.Complex)
     return y.to_numpy(), h_last.to_numpy()
   else:
-    return y, h_last
+    return y, h_last  # pytype: disable=bad-return-type
 
 
 def lru_pallas_scan(
@@ -982,4 +986,4 @@ def lru_pallas_scan(
     assert isinstance(h_last, complex_lib.Complex)
     return y.to_numpy(), h_last.to_numpy()
   else:
-    return y, h_last
+    return y, h_last  # pytype: disable=bad-return-type
