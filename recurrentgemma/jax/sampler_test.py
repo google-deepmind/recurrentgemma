@@ -18,9 +18,9 @@ from collections.abc import Iterable
 
 from absl.testing import absltest
 from absl.testing import parameterized
-import chex
 import jax
 import jax.numpy as jnp
+import numpy as np
 from recurrentgemma import common
 import recurrentgemma.jax as griffin_lib
 
@@ -229,12 +229,12 @@ class SamplerTest(parameterized.TestCase):
         return_logits=True,
     )
     total_sampled_tokens = total_generation_steps + token_input.shape[-1]
-    chex.assert_shape(
-        jnp.array(output_sampler.logits),
+    self.assertEqual(
+        jnp.asarray(output_sampler.logits).shape,
         (batch_size, total_sampled_tokens, model_config.vocab_size),
     )
-    chex.assert_shape(
-        jnp.array(output_sampler.tokens),
+    self.assertEqual(
+        jnp.asarray(output_sampler.tokens).shape,
         (batch_size, total_sampled_tokens),
     )
 
@@ -248,7 +248,7 @@ class SamplerTest(parameterized.TestCase):
       rtol = 1e-6
       atol = 1e-6
 
-    chex.assert_trees_all_close(
+    np.testing.assert_allclose(
         output_forward,
         out_logits,
         rtol=rtol,
